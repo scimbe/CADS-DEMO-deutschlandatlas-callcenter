@@ -206,6 +206,8 @@
   let pending=null;                                // Rasa-style pending-clarify: set while we await an answer to our own question
   let slots={ort:null,indikator:null};             // dialogue-state slots carried across turns
   const ffEl=document.getElementById('funfact');
+  function showFunfact(ff){ if(!ff||!ff.text) return; ffEl.style.display='block';
+    ffEl.innerHTML='<div class="h">💡 Wussten Sie schon?</div>'+ff.text+' <a href="'+ff.url+'" target="_blank" rel="noopener">Quelle: Wikipedia</a>'; }
   function reset(){src.style.display='none';src.classList.remove('refuse');replay.style.display='none';ffEl.style.display='none';hideCtl();}
   function playClip(url){try{stopFiller();fillerEl.onended=null;showCtl();
     const start=()=>fillerEl.play().catch(()=>{});
@@ -272,9 +274,15 @@
     speakQ=[]; speaking2=false; answerDone=false;   // fresh spoken queue for this answer
     qEcho.innerHTML='<span>'+(isFollowup?'Weiter gefragt:':'Frage:')+'</span> <b></b>'; qEcho.querySelector('b').textContent=query;
     aEl.className='a working'; aEl.textContent='Ich hole die Antwort …'; setState('query'); startWait();
+    let ctxShown=false, ctxSpoke=false, answered=false;
+    // fill the wait with spoken Wikipedia context (fast, no ArcGIS) WHILE the real answer is computed
+    fetch('/context',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({query})}).then(r=>r.json()).then(c=>{
+      if(c&&c.funfact&&c.funfact.text){ if(!ctxShown){ctxShown=true; showFunfact(c.funfact);}
+        if(!answered && c.funfact.audioUrl){ ctxSpoke=true; stopFiller(); playClip(c.funfact.audioUrl); } }
+    }).catch(()=>{});
     try{
       const d=await (await fetch('/answer',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({query})})).json();
-      stopWait();
+      answered=true; stopWait();
       const ans=d.answer||d.error||'Dazu habe ich leider keine Antwort erhalten.';
       const matched=d.meta?(d.meta.has_real_data!==false && !!d.meta.table):true;
       setState('speak'); playAnswer(d.audioUrl);
@@ -284,8 +292,8 @@
           else{src.querySelector('.tick').textContent='✓ geerdet · Live-Quelle';
             srcTxt.innerHTML=`<span class="pill">${m.table||'—'}</span> <span class="pill">${m.place_resolved||m.place_name_requested||''}</span> <span class="pill">${m.live_rows_used||0} Live-Zeile(n)</span>`;}
         }
-        if(d.funfact&&d.funfact.text){ffEl.style.display='block';ffEl.innerHTML='<div class="h">💡 Wussten Sie schon?</div>'+d.funfact.text+' <a href="'+d.funfact.url+'" target="_blank" rel="noopener">Quelle: Wikipedia</a>';
-          queueSpeak(d.funfact.audioUrl);}   // Thorsten speaks the fun fact, right after the answer
+        if(d.funfact&&d.funfact.text){ if(!ctxShown){ctxShown=true; showFunfact(d.funfact);}
+          if(!ctxSpoke) queueSpeak(d.funfact.audioUrl); }   // only speak after the answer if context didn't already fill the wait with it
         if(!d.audioUrl){setTimeout(()=>setState('done'),800);}
         lastQuery=query; lastAnswer=ans;
         history.push({q:query, place:(d.meta&&(d.meta.place_resolved||d.meta.place_name_requested))||null, answer:ans});
