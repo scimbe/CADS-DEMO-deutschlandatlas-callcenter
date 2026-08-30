@@ -180,6 +180,7 @@
   }
 
   const choicesEl=document.getElementById('choices');
+  let lastQuery=null,lastAnswer=null;   // conversation context for follow-ups
   function clearChoices(){choicesEl.style.display='none';choicesEl.innerHTML='';}
   function renderChoices(items, noteHtml, isFollowup){
     choicesEl.innerHTML='';
@@ -200,7 +201,7 @@
     playFiller(); setState('listen'); aEl.className='a working'; aEl.textContent='Ich verstehe Ihre Frage …';
     setTimeout(()=>setState('think'),500);
     try{
-      const u=await (await fetch('/understand',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({query})})).json();
+      const u=await (await fetch('/understand',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({query,context:{lastQuery,lastAnswer}})})).json();
       go.disabled=false; q.disabled=false;
       if(u.precise){ deliver(u.best_guess); return; }
       stopFiller(); setState('idle');
@@ -232,6 +233,7 @@
         }
         if(d.funfact&&d.funfact.text){ffEl.style.display='block';ffEl.innerHTML='<div class="h">💡 Wussten Sie schon?</div>'+d.funfact.text+' <a href="'+d.funfact.url+'" target="_blank" rel="noopener">Quelle: Wikipedia</a>';}
         if(!d.audioUrl){setTimeout(()=>setState('done'),800);}
+        lastQuery=query; lastAnswer=ans;
         go.disabled=false; q.disabled=false;
         doFollowup(query, ans); renderExamples();
       });

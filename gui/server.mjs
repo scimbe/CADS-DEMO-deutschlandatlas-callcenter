@@ -16,6 +16,7 @@
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
 import { readFile, writeFile, rm } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -24,6 +25,23 @@ const __dir = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dir, '..');
 const PORT = parseInt(process.env.PORT || '8791', 10);
 const RUNTIME = join(REPO_ROOT, 'scripts', 'n8n_workflow_runtime.mjs');
+
+// Compact list of the indicators the dataset can actually answer — injected into the
+// understand/follow-up prompts so suggested questions are always answerable (deduped by topic).
+let CATALOG_SUMMARY = '';
+try {
+  const cat = JSON.parse(readFileSync(join(REPO_ROOT, 'catalog.json'), 'utf8'));
+  const rows = cat.rows || Object.values(cat).find(Array.isArray) || [];
+  const seen = new Set(), lines = [];
+  for (const r of rows) {
+    if (r.kind !== 'indicator') continue;
+    const desc = (r.snippet || '').replace(/\s+/g, ' ').replace(/,?\s*(im Jahr|in\s*_?)?\s*\d{4}.*$/i, '').trim();
+    const k = desc.slice(0, 45).toLowerCase();
+    if (desc.length < 12 || seen.has(k)) continue;
+    seen.add(k); lines.push('- ' + desc.slice(0, 95));
+  }
+  CATALOG_SUMMARY = lines.join('\n');
+} catch {}
 
 function runPipeline(query) {
   return new Promise((resolve) => {
@@ -151,8 +169,14 @@ const UNDERSTAND_SYS = [
   'Fehlt der Ort, frage gezielt nach dem Ort. Ist das Thema unklar, biete die naheliegendsten Indikatoren an.',
 ].join('\n');
 
-async function understand(query) {
-  const u = await llmJSON(UNDERSTAND_SYS, 'Nutzerfrage: ' + query);
+async function understand(query, context) {
+  const sys = UNDERSTAND_SYS + (CATALOG_SUMMARY
+    ? '\n\nVERFÜGBARE INDIKATOREN — best_guess und options MÜSSEN sich mit einem davon beantworten lassen:\n' + CATALOG_SUMMARY : '');
+  const ctx = context && context.lastQuery
+    ? 'Laufendes Gespräch. Vorige Frage: "' + context.lastQuery + '"'
+      + (context.lastAnswer ? ('. Vorige Antwort: "' + String(context.lastAnswer).slice(0, 280) + '"') : '')
+      + '. Die neue Eingabe kann sich darauf beziehen (nur anderer Ort/Indikator, elliptisch). Löse solche Bezüge zu einer vollständigen Frage auf.\n\n' : '';
+  const u = await llmJSON(sys, ctx + 'Neue Eingabe: ' + query);
   return {
     precise: !!u.precise,
     clarify: (u.clarify || '').toString(),
@@ -172,7 +196,9 @@ const FOLLOWUP_SYS = [
   ' "suggestions": [string]} // 2-3 konkrete Anschlussfragen als vollständige deutsche Fragesätze (je Indikator + Ort)',
 ].join('\n');
 async function followup(query, answer) {
-  const u = await llmJSON(FOLLOWUP_SYS, 'Beantwortete Frage: ' + query + '\nGegebene Antwort: ' + (answer || ''));
+  const sys = FOLLOWUP_SYS + (CATALOG_SUMMARY
+    ? '\n\nVERFÜGBARE INDIKATOREN — schlage NUR Fragen vor, die sich mit einem davon beantworten lassen:\n' + CATALOG_SUMMARY : '');
+  const u = await llmJSON(sys, 'Beantwortete Frage: ' + query + '\nGegebene Antwort: ' + (answer || ''));
   return {
     invite: (u.invite || 'Möchten Sie noch etwas wissen?').toString(),
     suggestions: Array.isArray(u.suggestions) ? u.suggestions.filter((x) => typeof x === 'string').slice(0, 3) : [],
@@ -189,9 +215,10 @@ const server = createServer(async (req, res) => {
     return;
   }
   if (req.method === 'POST' && req.url === '/understand') {
-    const query = ((await readBody(req)).query || '').toString().slice(0, 300);
+    const b = await readBody(req);
+    const query = (b.query || '').toString().slice(0, 300);
     if (!query.trim()) return jsonRes(res, 400, { error: 'empty query' });
-    const u = await understand(query);
+    const u = await understand(query, b.context);
     answerFor(u.best_guess);                       // fire speculation in the background
     let clarifyAudioUrl = null;
     if (!u.precise && u.clarify) { try { clarifyAudioUrl = proxied(await ttsSpeak(u.clarify, 'primary')); } catch {} }
