@@ -115,7 +115,7 @@ async function wikiFunFact(place) {
     if (!r.ok) return null;
     const j = await r.json();
     if (j.type === 'disambiguation' || !j.extract) return null;
-    // first 1-2 sentences, taken VERBATIM from Wikipedia -- never rephrased, never LLM-touched
+    // first 1-2 sentences, taken VERBATIM from Wikipedia as the source of truth (narrate() later restyles it, number-guarded)
     const text = j.extract.split(/(?<=[.!?])\s+/).slice(0, 2).join(' ').trim();
     if (text.length < 20) return null;
     return { text, title: j.title || place, url: j.content_urls?.desktop?.page || ('https://de.wikipedia.org/wiki/' + encodeURIComponent(place)) };
@@ -130,11 +130,20 @@ function answerFor(query) {
   if (specCache.has(key)) return specCache.get(key);
   const promise = (async () => {
     const [r, funfact] = await Promise.all([runPipeline(key), wikiFunFact(placeFromQuery(key))]);  // Wikipedia in parallel
-    const answer = r.final?.text || r.final?.answer || null;
+    const rawAnswer = r.final?.text || r.final?.answer || null;
     const meta = r.final?.meta || null;
-    let au = null;
-    if (answer) { try { au = await ttsSpeak(answer, 'primary'); } catch {} }
-    return { ok: r.ok, answer, meta, audioUrl: proxied(au), funfact, err: r.ok ? null : (r.err || 'pipeline failed') };
+    // narrative style for the answer + entertaining spoken style for the fun fact -- strictly grounded (number-guarded)
+    const [answer, ffText] = await Promise.all([
+      rawAnswer ? narrate(rawAnswer, 'answer') : Promise.resolve(null),
+      funfact ? narrate(funfact.text, 'funfact') : Promise.resolve(null),
+    ]);
+    let au = null, ffAu = null;
+    await Promise.all([                                              // answer + fun-fact spoken in parallel (both Thorsten)
+      answer ? ttsSpeak(answer, 'primary').then((u) => { au = u; }, () => {}) : Promise.resolve(),
+      ffText ? ttsSpeak(ffText, 'primary').then((u) => { ffAu = u; }, () => {}) : Promise.resolve(),
+    ]);
+    const ff = funfact ? { ...funfact, text: ffText || funfact.text, audioUrl: proxied(ffAu) } : null;
+    return { ok: r.ok, answer, meta, audioUrl: proxied(au), funfact: ff, err: r.ok ? null : (r.err || 'pipeline failed') };
   })();
   specCache.set(key, promise);
   if (specCache.size > 24) specCache.delete(specCache.keys().next().value);
@@ -153,6 +162,31 @@ async function llmJSON(system, user) {
     const j = await resp.json();
     return JSON.parse(j.choices?.[0]?.message?.content || '{}');
   } catch { return {}; }
+}
+
+// Rephrase into a more narrative / spoken German style WITHOUT changing facts.
+// Numbers are the falsification risk: if any number from the source is missing in the output, keep the original.
+async function narrate(text, mode) {
+  const srcT = (text || '').trim();
+  if (srcT.length < 12) return srcT;
+  const base = (process.env.LITELLM_BASE_URL || '').replace(/\/$/, '');
+  const key = process.env.LITELLM_API_KEY, model = process.env.LITELLM_DEFAULT_MODEL || 'local-devstral-small2';
+  const sys = mode === 'funfact'
+    ? 'Formuliere den folgenden Wikipedia-Auszug in einen kurzen, unterhaltsamen, gesprochenen deutschen Sprechtext um (maximal 2 Sätze). Behalte JEDE Zahl, JEDEN Namen und JEDEN Fakt exakt bei; erfinde NICHTS und verfälsche nichts. Nur der Stil wird lockerer und erzählender, der Inhalt bleibt gleich. Antworte NUR mit dem umformulierten Text, ohne Anführungszeichen, ohne Vorrede.'
+    : 'Formuliere die folgende Datenauskunft in flüssigen, leicht erzählenden deutschen Sprechtext um (1 bis 3 Sätze, nicht nur kurze Hauptsätze aneinanderreihen). Behalte JEDE Zahl, JEDEN Orts- und Eigennamen und JEDEN Fakt exakt bei; erfinde NICHTS hinzu. Antworte NUR mit dem umformulierten Text, ohne Anführungszeichen, ohne Vorrede.';
+  try {
+    const resp = await fetch(base + '/chat/completions', {
+      method: 'POST', headers: { authorization: 'Bearer ' + key, 'content-type': 'application/json' },
+      body: JSON.stringify({ model, temperature: 0.4, max_tokens: 260,
+        messages: [{ role: 'system', content: sys }, { role: 'user', content: srcT }] }),
+    });
+    const j = await resp.json();
+    let out = (j.choices?.[0]?.message?.content || '').trim().replace(/^["'»“]+|["'«”]+$/g, '').trim();
+    if (!out || out.length < 10 || out.length > srcT.length * 3 + 120) return srcT;   // sanity bounds
+    const nums = (srcT.match(/\d[\d.,]*/g) || []).map((n) => n.replace(/[.,]+$/, ''));  // grounding guard
+    for (const n of nums) { if (!out.includes(n)) return srcT; }
+    return out;
+  } catch { return srcT; }
 }
 
 const UNDERSTAND_SYS = [
@@ -188,12 +222,19 @@ async function understand(query, context) {
 const FOLLOWUP_SYS = [
   'Du bist ein deutsches Sprach-Callcenter für Deutschlandatlas-Regionaldaten und führst ein',
   'LAUFENDES Gespräch fort (kein neuer Kontakt). Der Anrufer hat gerade eine Antwort erhalten.',
-  'Biete IMMER passende Anschlussfragen an (gleicher Ort, verwandtes Thema, oder derselbe Indikator',
-  'für einen Vergleichsort). Antworte NUR mit striktem JSON, ohne Erklärung:',
+  'Biete IMMER passende Anschlussfragen an. WICHTIG: Jede vorgeschlagene Anschlussfrage MUSS sich',
+  'mit den vorhandenen Daten TATSÄCHLICH beantworten lassen. Bevorzuge deshalb genau diese beiden',
+  'sicheren Muster:',
+  '  (A) DERSELBE Indikator wie gerade eben, aber für eine andere vergleichbare Stadt/einen Kreis',
+  '      (gerade "Arbeitslosenquote Kiel" -> "... in Lübeck?" / "... in Flensburg?").',
+  '  (B) ein ANDERER, in der Liste unten aufgeführter Indikator für DENSELBEN Ort.',
+  'Erfinde KEINE Kennzahlen, die es in der Liste nicht gibt, und frage NICHT nach absoluten Zahlen,',
+  'wenn nur Quoten/Anteile vorliegen. Antworte NUR mit striktem JSON, ohne Erklärung:',
   '{"invite": string,        // eine EINZELNE, VOLLSTÄNDIG AUSFORMULIERTE gesprochene Anschlussfrage,',
   '                          // die an das Gespräch anknüpft. NIEMALS bei "zum Beispiel" oder ":" aufhören.',
-  '                          // z.B. "Möchten Sie auch wissen, wie hoch die Arbeitslosenquote in Kiel ist?"',
-  ' "suggestions": [string]} // 2-3 konkrete Anschlussfragen als vollständige deutsche Fragesätze (je Indikator + Ort)',
+  '                          // z.B. "Möchten Sie auch wissen, wie hoch die Arbeitslosenquote in Lübeck ist?"',
+  ' "suggestions": [string]} // 3-5 konkrete Anschlussfragen als vollständige deutsche Fragesätze,',
+  '                          //   jede nach Muster (A) oder (B), jede sicher aus den Daten beantwortbar.',
 ].join('\n');
 async function followup(query, answer) {
   const sys = FOLLOWUP_SYS + (CATALOG_SUMMARY
@@ -201,8 +242,21 @@ async function followup(query, answer) {
   const u = await llmJSON(sys, 'Beantwortete Frage: ' + query + '\nGegebene Antwort: ' + (answer || ''));
   return {
     invite: (u.invite || 'Möchten Sie noch etwas wissen?').toString(),
-    suggestions: Array.isArray(u.suggestions) ? u.suggestions.filter((x) => typeof x === 'string').slice(0, 3) : [],
+    suggestions: Array.isArray(u.suggestions) ? u.suggestions.filter((x) => typeof x === 'string').slice(0, 5) : [],
   };
+}
+
+// only keep follow-up suggestions the pipeline can actually answer with real data (bounded wait; raw fallback)
+async function validateSuggestions(suggestions, want = 3, timeoutMs = 22000) {
+  if (!suggestions.length) return [];
+  const checks = suggestions.map((s) => answerFor(s)
+    .then((r) => ({ s, ok: !!(r && r.ok && r.meta && r.meta.has_real_data !== false && r.meta.table) }))
+    .catch(() => ({ s, ok: false })));
+  const timeout = new Promise((res) => setTimeout(() => res(null), timeoutMs));
+  const settled = await Promise.race([Promise.all(checks), timeout]);
+  if (!settled) return suggestions.slice(0, want);          // timed out -> fall back to grounded raw
+  const good = settled.filter((x) => x.ok).map((x) => x.s);
+  return good.length ? good.slice(0, want) : suggestions.slice(0, want);
 }
 
 async function readBody(req) { let b = ''; for await (const c of req) b += c; try { return JSON.parse(b); } catch { return {}; } }
@@ -241,10 +295,11 @@ const server = createServer(async (req, res) => {
     const query = (b.query || '').toString().slice(0, 300);
     if (!query.trim()) return jsonRes(res, 400, { error: 'empty query' });
     const f = await followup(query, (b.answer || '').toString().slice(0, 600));
+    f.suggestions.forEach((s) => answerFor(s));   // start speculation for all candidates
+    const validated = await validateSuggestions(f.suggestions, 3);   // keep only answerable ones (bounded)
     let inviteAudioUrl = null;
     if (f.invite) { try { inviteAudioUrl = proxied(await ttsSpeak(f.invite, 'primary')); } catch {} }
-    f.suggestions.forEach((s) => answerFor(s));   // pre-speculate the follow-ups too
-    return jsonRes(res, 200, { ...f, inviteAudioUrl });
+    return jsonRes(res, 200, { ...f, suggestions: validated, inviteAudioUrl });
   }
   if (req.method === 'GET' && /^\/fillers\/filler[1-9]\.wav$/.test(req.url)) {
     try { res.writeHead(200, { 'content-type': 'audio/wav', 'cache-control': 'public, max-age=3600' }); res.end(await readFile(join(__dir, req.url.replace(/^\//, '')))); }
