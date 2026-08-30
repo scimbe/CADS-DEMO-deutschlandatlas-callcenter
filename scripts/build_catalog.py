@@ -89,11 +89,11 @@ TOPIC_KEYWORDS = {
     "health": ["krankenhaus", "pflege", "arzt", "ärzt", "gesundheit", "hospital"],
     "education": ["schul", "abschluss", "bildung", "kita", "kindertag", "kinderbetr", "betreu", "studier"],
     "finance": ["steuer", "kredit", "einnahme", "kassenkredit", "verschuld", "defizit", "einkommen", "mindestsicher", "grundsicher"],
-    "employment": ["beschäft", "arbeitslos", "arbeit", "erwerb", "pendel", "sozialversicher"],
+    "employment": ["beschäft", "arbeitslos", "arbeit", "erwerb", "pendel", "pendler", "verflechtung", "sozialversicher"],
     "infrastructure": ["ladepunkt", "ladestation", "elektrofahrz", "elektroantrieb", "pkw", "breitband", "glasfaser", "lte", "bahnhof", "fahrzeit", "erreichbar", "internet", "öpnv"],
     "environment": ["fläche", "erneuerbar", "energie", "klima", "siedlung", "natur", "heiz", "emission"],
     "housing": ["wohnung", "miete", "mietbelast", "baulandpreis", "eigenheim", "wohngeb", "wohnfläche", "fertiggestellt"],
-    "demographics": ["bevölker", "wanderung", "ausländer", "geburt", "sterbe", "altersstruktur", "durchschnittsalter", "zuzug", "fortzug", "dichte", "wahlbeteil"],
+    "demographics": ["bevölker", "wanderung", "ausländer", "geburt", "sterbe", "altersstruktur", "durchschnittsalter", "zuzug", "fortzug", "dichte", "je km", "wahlbeteil"],
 }
 
 # "Einwohner"/"Haushalt(e)" are per-capita DENOMINATORS, not topic signals. They must be
