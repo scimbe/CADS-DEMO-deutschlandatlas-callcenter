@@ -238,8 +238,26 @@ const UNDERSTAND_SYS = [
   ' "precise": boolean,   // true nur wenn (nach Auflösung) genau EIN Indikator UND ein Ort eindeutig sind',
   ' "clarify": string,    // EINE kurze, freundliche deutsche Rückfrage, die zur sauberen Anfrage führt (leer wenn precise=true)',
   ' "best_guess": string, // die vollständige, AUFGELÖSTE konkrete Frage als deutscher Fragesatz (Indikator + Ort); IMMER gesetzt',
-  ' "options": [string]}  // 2-3 konkrete alternative Fragesätze zur Auswahl (je Indikator + Ort)',
+  ' "options": [string],  // 2-3 konkrete alternative Fragesätze zur Auswahl (je Indikator + Ort)',
+  ' "slots": {"ort": string|null, "indikator": string|null}}  // die für best_guess erkannten Slots (Ort, Indikator)',
   'Fehlt der Ort auch nach Auflösung, frage gezielt nach dem Ort. Ist das Thema unklar, biete die naheliegendsten Indikatoren an.',
+].join('\n');
+
+// Rasa pattern_clarification: if we just asked a clarifying question, the user's next turn is
+// resolved AGAINST that pending question FIRST (short-circuit), not run through general new/follow-up NLU.
+const CLARIFY_SYS = [
+  'Du bist die Dialogführung eines deutschen Sprach-Callcenters für Deutschlandatlas-Regionaldaten.',
+  'Das System hat SOEBEN eine Rückfrage gestellt. Der Nutzer ANTWORTET nun darauf. Deine Aufgabe:',
+  'die Antwort mit der ursprünglich unklaren Eingabe und den angebotenen Optionen zu EINER',
+  'vollständigen, eigenständigen deutschen Frage (genau ein Indikator + ein Ort) auflösen.',
+  'Wählt die Antwort klar eine Option / den best_guess, oder liefert sie den fehlenden Ort bzw.',
+  'Indikator, dann precise=true. Bleibt es unklar, precise=false und stelle EINE erneute Rückfrage.',
+  'Der Nutzer darf in seiner Antwort auch umschwenken (anderer Indikator UND/ODER Ort) — dann folge dem.',
+  'best_guess ist IMMER ein VOLLSTÄNDIGER deutscher Fragesatz mit BEIDEM: Indikator UND Ort',
+  '(z.B. "Wie hoch ist die Arbeitslosenquote in Hamburg?"), niemals nur der Indikatorname.',
+  'slots.ort und slots.indikator müssen zu best_guess passen.',
+  'Antworte NUR mit striktem JSON: {"precise": boolean, "clarify": string, "best_guess": string,',
+  ' "options": [string], "slots": {"ort": string|null, "indikator": string|null}}',
 ].join('\n');
 
 // Build a compact multi-turn memory string from the conversation history (most recent last).
@@ -261,17 +279,45 @@ function memoryBlock(context) {
     + '\nDer letzte Turn ist der Bezugspunkt für Anschlüsse.\n\n';
 }
 
+function normSlots(s) {
+  const o = s && typeof s === 'object' ? s : {};
+  return { ort: o.ort ? String(o.ort) : null, indikator: o.indikator ? String(o.indikator) : null };
+}
+
+// Which already-filled slots got OVERWRITTEN (not just newly filled) vs the previous turn's slots.
+// A change to an already-set slot is a mini topic-pivot signal (per DST) rather than a silent merge.
+function overwrittenSlots(prev, next) {
+  const p = normSlots(prev), n = normSlots(next), out = [];
+  for (const k of ['ort', 'indikator']) if (p[k] && n[k] && p[k] !== n[k]) out.push(k);
+  return out;
+}
+
 async function understand(query, context) {
-  const sys = UNDERSTAND_SYS + (CATALOG_SUMMARY
-    ? '\n\nVERFÜGBARE INDIKATOREN — best_guess und options MÜSSEN sich mit einem davon beantworten lassen:\n' + CATALOG_SUMMARY : '');
-  const u = await llmJSON(sys, memoryBlock(context) + 'Neue Eingabe: ' + query);
-  const kind = (u.kind === 'anschluss' || u.kind === 'neu') ? u.kind : 'neu';
+  const catalog = CATALOG_SUMMARY
+    ? '\n\nVERFÜGBARE INDIKATOREN — best_guess und options MÜSSEN sich mit einem davon beantworten lassen:\n' + CATALOG_SUMMARY : '';
+  const pending = context && context.pending;
+  let u, kind;
+  if (pending && (pending.clarify || (pending.options && pending.options.length) || pending.best_guess)) {
+    // case (c): the user is answering the clarifying question we just asked -> short-circuit to resolution
+    const ask = 'Unsere Rückfrage war: "' + (pending.clarify || '') + '"\n'
+      + 'Angebotene Optionen: ' + JSON.stringify((pending.options || []).concat(pending.best_guess ? [pending.best_guess] : [])) + '\n'
+      + 'Ursprüngliche, unklare Eingabe des Nutzers: "' + (pending.original || '') + '"\n'
+      + 'Antwort des Nutzers jetzt: "' + query + '"';
+    u = await llmJSON(CLARIFY_SYS + catalog, ask);
+    kind = 'klarstellung';
+  } else {
+    u = await llmJSON(UNDERSTAND_SYS + catalog, memoryBlock(context) + 'Neue Eingabe: ' + query);
+    kind = (u.kind === 'anschluss' || u.kind === 'neu') ? u.kind : 'neu';
+  }
+  const slots = normSlots(u.slots);
   return {
     kind,
     precise: !!u.precise,
     clarify: (u.clarify || '').toString(),
     best_guess: (u.best_guess || query).toString(),
     options: Array.isArray(u.options) ? u.options.filter((x) => typeof x === 'string').slice(0, 3) : [],
+    slots,
+    overwritten_slots: overwrittenSlots(context && context.slots, slots),
   };
 }
 

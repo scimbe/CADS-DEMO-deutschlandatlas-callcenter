@@ -203,6 +203,8 @@
   }
 
   let lastQuery=null,lastAnswer=null,history=[];   // conversation memory (multi-turn) for follow-up resolution
+  let pending=null;                                // Rasa-style pending-clarify: set while we await an answer to our own question
+  let slots={ort:null,indikator:null};             // dialogue-state slots carried across turns
   const ffEl=document.getElementById('funfact');
   function reset(){src.style.display='none';src.classList.remove('refuse');replay.style.display='none';ffEl.style.display='none';hideCtl();}
   function playClip(url){try{stopFiller();fillerEl.onended=null;showCtl();
@@ -246,9 +248,13 @@
     playFiller(); setState('listen'); aEl.className='a working'; aEl.textContent='Ich verstehe Ihre Frage …';
     setTimeout(()=>setState('think'),500);
     try{
-      const u=await (await fetch('/understand',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({query,context:{history,lastQuery,lastAnswer}})})).json();
+      const sentPending=pending;   // this turn is answered against the clarify we asked last turn (if any)
+      const u=await (await fetch('/understand',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({query,context:{history,lastQuery,lastAnswer,pending:sentPending,slots}})})).json();
       go.disabled=false; q.disabled=false;
-      if(u.precise){ deliver(u.best_guess, u.kind==='anschluss'); return; }
+      if(u.slots) slots={ort:u.slots.ort||slots.ort, indikator:u.slots.indikator||slots.indikator};   // merge dialogue-state slots
+      if(u.precise){ pending=null; deliver(u.best_guess, u.kind==='anschluss'||u.kind==='klarstellung'); return; }
+      // not precise -> remember what we asked, so the NEXT turn is treated as the answer to THIS question
+      pending={clarify:u.clarify||'', best_guess:u.best_guess||'', options:u.options||[], original:query};
       stopFiller(); setState('idle');
       aEl.className='a'; aEl.textContent=u.clarify||'Können Sie Ihre Frage etwas genauer stellen?';
       if(u.clarifyAudioUrl) playClip(u.clarifyAudioUrl);
@@ -261,6 +267,7 @@
 
   // phase 2 — deliver the grounded answer (instant when it was speculated)
   async function deliver(query, isFollowup){
+    pending=null;   // a delivered answer supersedes any open clarification
     go.disabled=true; q.disabled=true; reset(); playFiller();
     speakQ=[]; speaking2=false; answerDone=false;   // fresh spoken queue for this answer
     qEcho.innerHTML='<span>'+(isFollowup?'Weiter gefragt:':'Frage:')+'</span> <b></b>'; qEcho.querySelector('b').textContent=query;
