@@ -84,19 +84,39 @@ async function transcribe(buf) {
   finally { rm(inp, { force: true }).catch(() => {}); rm(wav, { force: true }).catch(() => {}); }
 }
 
-// --- speculation cache: query -> Promise<{ok,answer,meta,audioUrl,err}> ---
+// --- optional, VERBATIM Wikipedia fun fact for the place, fetched IN PARALLEL with the atlas ---
+function placeFromQuery(q) {
+  const m = (q || '').match(/\b(?:in|für|von|zu|über)\s+([A-ZÄÖÜ][\wäöüß.-]+(?:\s[A-ZÄÖÜ][\wäöüß.-]+)?)/);
+  return m ? m[1].replace(/[.?!,;:]+$/, '').trim() : null;
+}
+async function wikiFunFact(place) {
+  if (!place) return null;
+  try {
+    const r = await fetch('https://de.wikipedia.org/api/rest_v1/page/summary/' + encodeURIComponent(place),
+      { headers: { accept: 'application/json', 'user-agent': 'CADS-Demo-Callcenter/1.0 (https://bunsenbrenner.org)' } });
+    if (!r.ok) return null;
+    const j = await r.json();
+    if (j.type === 'disambiguation' || !j.extract) return null;
+    // first 1-2 sentences, taken VERBATIM from Wikipedia -- never rephrased, never LLM-touched
+    const text = j.extract.split(/(?<=[.!?])\s+/).slice(0, 2).join(' ').trim();
+    if (text.length < 20) return null;
+    return { text, title: j.title || place, url: j.content_urls?.desktop?.page || ('https://de.wikipedia.org/wiki/' + encodeURIComponent(place)) };
+  } catch { return null; }
+}
+
+// --- speculation cache: query -> Promise<{ok,answer,meta,audioUrl,funfact,err}> ---
 const specCache = new Map();
 function answerFor(query) {
   const key = (query || '').trim();
-  if (!key) return Promise.resolve({ ok: false, answer: null, meta: null, audioUrl: null, err: 'empty' });
+  if (!key) return Promise.resolve({ ok: false, answer: null, meta: null, audioUrl: null, funfact: null, err: 'empty' });
   if (specCache.has(key)) return specCache.get(key);
   const promise = (async () => {
-    const r = await runPipeline(key);
+    const [r, funfact] = await Promise.all([runPipeline(key), wikiFunFact(placeFromQuery(key))]);  // Wikipedia in parallel
     const answer = r.final?.text || r.final?.answer || null;
     const meta = r.final?.meta || null;
     let au = null;
     if (answer) { try { au = await ttsSpeak(answer, 'primary'); } catch {} }
-    return { ok: r.ok, answer, meta, audioUrl: proxied(au), err: r.ok ? null : (r.err || 'pipeline failed') };
+    return { ok: r.ok, answer, meta, audioUrl: proxied(au), funfact, err: r.ok ? null : (r.err || 'pipeline failed') };
   })();
   specCache.set(key, promise);
   if (specCache.size > 24) specCache.delete(specCache.keys().next().value);
