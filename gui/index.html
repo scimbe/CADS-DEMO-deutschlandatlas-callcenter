@@ -141,9 +141,11 @@
   const q=document.getElementById('q'),go=document.getElementById('go'),mic=document.getElementById('mic');
   const aEl=document.getElementById('a'),qEcho=document.getElementById('qEcho'),src=document.getElementById('src'),srcTxt=document.getElementById('srcTxt');
   const player=document.getElementById('player'),replay=document.getElementById('replay'),timerEl=document.getElementById('timer');
-  const EXAMPLES=['Wie hoch ist die Straftatenquote in Kiel?','Wie viele Schulabgänger in Kiel haben keinen Hauptschulabschluss?','Wie viele Arbeitslose gibt es in Dresden?'];
+  const EX_POOL=['Wie hoch ist die Straftatenquote in Kiel?','Wie viele Schulabgänger in Kiel haben keinen Hauptschulabschluss?','Wie viele Arbeitslose gibt es in Dresden?','Wie hoch ist die Arbeitslosenquote in Leipzig?','Wie viele Ärzte gibt es je 100.000 Einwohner in München?','Wie hoch ist die Steuereinnahmekraft in Hamburg?','Wie ist die Breitbandversorgung in Rostock?','Wie hoch ist der Ausländeranteil in Frankfurt?','Wie viele Ladepunkte für Elektroautos gibt es in Stuttgart?','Wie hoch ist die Kriminalitätsrate in Dortmund?','Wie hoch ist die Bevölkerungsdichte in Bremen?','Wie viele Straftaten pro 100.000 Einwohner gibt es in Hannover?'];
   const exWrap=document.getElementById('examples');
-  EXAMPLES.forEach(x=>{const b=document.createElement('button');b.className='ex';b.textContent=x;b.onclick=()=>{q.value=x;ask();};exWrap.appendChild(b);});
+  function shuffle(a){a=a.slice();for(let i=a.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[a[i],a[j]]=[a[j],a[i]];}return a;}
+  function renderExamples(){exWrap.innerHTML='';shuffle(EX_POOL).slice(0,3).forEach(x=>{const b=document.createElement('button');b.className='ex';b.textContent=x;b.onclick=()=>{q.value=x;ask();};exWrap.appendChild(b);});}
+  renderExamples();
 
   // instant spoken filler in THE Thorsten voice (pre-rendered, varied for naturalness) — bridges the compute wait
   const fillerEl=document.getElementById('filler');
@@ -175,12 +177,12 @@
 
   const choicesEl=document.getElementById('choices');
   function clearChoices(){choicesEl.style.display='none';choicesEl.innerHTML='';}
-  function renderChoices(items, noteHtml){
+  function renderChoices(items, noteHtml, isFollowup){
     choicesEl.innerHTML='';
     if(noteHtml){const n=document.createElement('div');n.className='note';n.innerHTML=noteHtml;choicesEl.appendChild(n);}
     items.forEach(it=>{const b=document.createElement('button');b.className='choice'+(it.best?' best':'');
       b.innerHTML=(it.best?'<b>'+it.label+'</b>':it.label)+(it.hint?'<small>'+it.hint+'</small>':'');
-      b.onclick=()=>{clearChoices();deliver(it.query);};choicesEl.appendChild(b);});
+      b.onclick=()=>{clearChoices();deliver(it.query, !!isFollowup);};choicesEl.appendChild(b);});
     choicesEl.style.display='flex';}
   function reset(){src.style.display='none';src.classList.remove('refuse');replay.style.display='none';clearChoices();}
   function playClip(url){try{stopFiller();fillerEl.src=url;fillerEl.play().catch(()=>{});}catch(e){}}
@@ -207,9 +209,9 @@
   }
 
   // phase 2 — deliver the grounded answer (instant when it was speculated)
-  async function deliver(query){
+  async function deliver(query, isFollowup){
     go.disabled=true; q.disabled=true; reset(); playFiller();
-    qEcho.innerHTML='<span>Frage:</span> <b></b>'; qEcho.querySelector('b').textContent=query;
+    qEcho.innerHTML='<span>'+(isFollowup?'Weiter gefragt:':'Frage:')+'</span> <b></b>'; qEcho.querySelector('b').textContent=query;
     aEl.className='a working'; aEl.textContent='Ich hole die Antwort …'; setState('query'); startWait();
     try{
       const d=await (await fetch('/answer',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({query})})).json();
@@ -225,7 +227,7 @@
         }
         if(!d.audioUrl){setTimeout(()=>setState('done'),800);}
         go.disabled=false; q.disabled=false;
-        doFollowup(query, ans);
+        doFollowup(query, ans); renderExamples();
       });
     }catch(e){stopWait();aEl.className='a';aEl.textContent='Verbindungsfehler: '+e.message;setState('done');go.disabled=false;q.disabled=false;}
   }
@@ -235,7 +237,7 @@
     try{
       const f=await (await fetch('/followup',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({query,answer})})).json();
       const items=(f.suggestions||[]).map(s=>({label:s,query:s}));
-      if(items.length) renderChoices(items,'💬 '+(f.invite||'Möchten Sie noch etwas wissen?'));
+      if(items.length) renderChoices(items,'💬 '+(f.invite||'Möchten Sie noch etwas wissen?'), true);
       const speakInvite=()=>{ if(f.inviteAudioUrl) playClip(f.inviteAudioUrl); };
       if(f.inviteAudioUrl){ if(player.src && !player.paused && !player.ended){ player.addEventListener('ended',speakInvite,{once:true}); } else speakInvite(); }
     }catch(e){}
@@ -243,22 +245,37 @@
 
   go.onclick=ask; q.addEventListener('keydown',e=>{if(e.key==='Enter')ask();});
 
-  const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
-  if(SR){let rec=null,listening=false;
-    const ERR={'not-allowed':'Bitte erlauben Sie den Mikrofon-Zugriff.','service-not-allowed':'Mikrofon-Zugriff ist blockiert.','no-speech':'Ich habe nichts gehört — bitte erneut auf 🎙️ tippen und sprechen.','audio-capture':'Kein Mikrofon gefunden.','network':'Die Spracherkennung braucht eine Internetverbindung.','aborted':'Spracheingabe abgebrochen — bitte erneut versuchen.'};
-    mic.onclick=()=>{
-      if(listening){try{rec&&rec.stop();}catch(e){} return;}
-      try{
-        stopFiller(); rec=new SR(); rec.lang='de-DE'; rec.interimResults=false; rec.maxAlternatives=1; rec.continuous=false;
-        rec.onstart=()=>{listening=true;mic.classList.add('on');setState('listen');};
-        rec.onresult=e=>{q.value=e.results[0][0].transcript;ask();};
-        rec.onerror=e=>{listening=false;mic.classList.remove('on');setState('idle');
-          aEl.className='a';aEl.textContent='Spracheingabe: '+(ERR[e.error]||e.error)+' — Sie können die Frage auch tippen.';};
-        rec.onend=()=>{listening=false;mic.classList.remove('on');};
-        rec.start();
-      }catch(err){listening=false;mic.classList.remove('on');aEl.className='a';aEl.textContent='Spracheingabe nicht verfügbar — bitte tippen. ('+err.message+')';}
-    };
-  } else { mic.disabled=true; mic.title='Spracherkennung im Browser nicht verfügbar (bitte Chrome verwenden)'; }
+  // Microphone -> record -> OUR OWN server-side Whisper STT (no browser cloud dependency, works
+  // in any modern browser). Click to start, click again to stop and transcribe.
+  let mediaRec=null,recording=false,recStream=null,recChunks=[];
+  async function startRec(){
+    try{
+      recStream=await navigator.mediaDevices.getUserMedia({audio:true});
+      recChunks=[]; mediaRec=new MediaRecorder(recStream);
+      mediaRec.ondataavailable=e=>{if(e.data&&e.data.size)recChunks.push(e.data);};
+      mediaRec.onstop=async ()=>{
+        recording=false; mic.classList.remove('on'); try{recStream.getTracks().forEach(t=>t.stop());}catch(e){}
+        setState('think'); aEl.className='a working'; aEl.textContent='Ich verarbeite Ihre Aufnahme …';
+        try{
+          const blob=new Blob(recChunks,{type:(mediaRec&&mediaRec.mimeType)||'audio/webm'});
+          const d=await (await fetch('/stt',{method:'POST',headers:{'content-type':blob.type},body:blob})).json();
+          if(d.text && d.text.trim()){ q.value=d.text.trim(); ask(); }
+          else { aEl.className='a'; aEl.textContent='Ich habe leider nichts verstanden — bitte erneut auf 🎙️ tippen und sprechen, oder tippen Sie Ihre Frage.'; setState('idle'); }
+        }catch(e){ aEl.className='a'; aEl.textContent='Spracherkennung fehlgeschlagen — bitte tippen Sie Ihre Frage.'; setState('idle'); }
+      };
+      mediaRec.start(); recording=true; mic.classList.add('on'); setState('listen');
+      aEl.className='a working'; aEl.textContent='🎙️ Ich höre zu … (zum Stoppen erneut auf 🎙️ tippen)';
+    }catch(err){
+      mic.classList.remove('on');
+      const m = err&&err.name==='NotAllowedError' ? 'Bitte erlauben Sie den Mikrofon-Zugriff in Ihrem Browser.'
+              : err&&err.name==='NotFoundError' ? 'Es wurde kein Mikrofon gefunden.'
+              : 'Mikrofon nicht verfügbar. Es könnte auch am Browser liegen — unterstützt sind aktuelle Chrome, Edge, Firefox und Safari. Sie können die Frage auch tippen.';
+      aEl.className='a'; aEl.textContent='Spracheingabe: '+m;
+    }
+  }
+  if(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder){
+    mic.onclick=()=>{ if(recording){ try{mediaRec&&mediaRec.stop();}catch(e){} } else { stopFiller(); startRec(); } };
+  } else { mic.disabled=true; mic.title='Sprachaufnahme wird von diesem Browser nicht unterstützt (aktuelle Chrome, Edge, Firefox oder Safari verwenden).'; }
 })();
 </script>
 </body>
