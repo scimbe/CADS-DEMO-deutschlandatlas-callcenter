@@ -84,20 +84,29 @@ def parse_table(readme_text: str):
 
 
 TOPIC_KEYWORDS = {
-    "employment": ["beschäft", "arbeit", "erwerb", "pendel", "arbeitslos", "sozialversicherung"],
-    "housing": ["wohnung", "miet", "wohn", "baulandpreis", "haus"],
-    "demographics": ["bevölker", "einwohner", "alter", "ausländer", "geburt", "sterb"],
-    "infrastructure": ["ladestation", "breitband", "lte", "öv", "bahnhof", "straße", "fahrzeit", "erreichbar"],
-    "environment": ["fläche", "erneuerbar", "energie", "klima", "siedlung", "natur"],
+    # Order matters: specific topics first, broad ones last (first match wins).
     "crime": ["kriminal", "straftat", "delikt"],
-    "health": ["krankenhaus", "pflege", "arzt", "ärzt"],
-    "finance": ["steuer", "kredit", "einnahme", "kassenkredit"],
-    "education": ["schul", "abschluss", "bildung"],
+    "health": ["krankenhaus", "pflege", "arzt", "ärzt", "gesundheit", "hospital"],
+    "education": ["schul", "abschluss", "bildung", "kita", "kindertag", "kinderbetr", "betreu", "studier"],
+    "finance": ["steuer", "kredit", "einnahme", "kassenkredit", "verschuld", "defizit", "einkommen", "mindestsicher", "grundsicher"],
+    "employment": ["beschäft", "arbeitslos", "arbeit", "erwerb", "pendel", "sozialversicher"],
+    "infrastructure": ["ladepunkt", "ladestation", "elektrofahrz", "elektroantrieb", "pkw", "breitband", "glasfaser", "lte", "bahnhof", "fahrzeit", "erreichbar", "internet", "öpnv"],
+    "environment": ["fläche", "erneuerbar", "energie", "klima", "siedlung", "natur", "heiz", "emission"],
+    "housing": ["wohnung", "miete", "mietbelast", "baulandpreis", "eigenheim", "wohngeb", "wohnfläche", "fertiggestellt"],
+    "demographics": ["bevölker", "wanderung", "ausländer", "geburt", "sterbe", "altersstruktur", "durchschnittsalter", "zuzug", "fortzug", "dichte", "wahlbeteil"],
 }
+
+# "Einwohner"/"Haushalt(e)" are per-capita DENOMINATORS, not topic signals. They must be
+# stripped before keyword matching -- otherwise "wohn" inside "Ein-wohn-er" wrongly tags nearly
+# every per-capita indicator as "housing" (this bug mislabeled the crime tables as housing,
+# which in turn made the call-center's LLM matcher refuse crime questions).
+DENOM_TERMS = ["einwohnerin", "einwohner", "haushalte", "haushalt"]
 
 
 def guess_topic(snippet: str) -> str:
-    s = snippet.lower()
+    s = (snippet or "").lower()
+    for d in DENOM_TERMS:
+        s = s.replace(d, "")
     for topic, kws in TOPIC_KEYWORDS.items():
         if any(kw in s for kw in kws):
             return topic
