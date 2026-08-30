@@ -43,7 +43,12 @@ RUN mkdir -p /opt/voices && cd /opt/voices \
 
 # ---- stage 2: runtime ----
 FROM node:22-bookworm-slim AS runtime
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
+# ffmpeg is required by gui/server.mjs's transcribe() — it resamples the uploaded audio to
+# 16kHz mono before handing it to whisper-cli. Missing this made /stt silently return an
+# empty transcript (ffmpeg exec failed, non-zero exit swallowed by the try/catch) — caught
+# by actually running the built Linux image and testing a real STT round-trip, not just
+# confirming whisper-cli + the model were present.
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates ffmpeg && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 
 # app code — GUI + the live pipeline runtime + the catalog
@@ -51,13 +56,18 @@ COPY gui ./gui
 COPY scripts ./scripts
 COPY catalog.json ./catalog.json
 
-# whisper-cli + model
-COPY --from=build /build/whisper.cpp/build/bin/whisper-cli /usr/local/bin/whisper-cli
+# whisper-cli + model. Copying the whole build/bin/ dir, not just the whisper-cli binary:
+# it's dynamically linked against libwhisper.so/libggml*.so (built as shared libs by this
+# cmake build), which live alongside it — copying only the executable left it unable to
+# even start ("error while loading shared libraries: libwhisper.so.1: cannot open shared
+# object file"), caught by actually invoking whisper-cli in the built image, not just
+# confirming the file was present.
+COPY --from=build /build/whisper.cpp/build/bin  /opt/whisper-cli-bin
 COPY --from=build /build/whisper.cpp/models/ggml-base.bin  /app/models/ggml-base.bin
 # piper (standalone, with its bundled libs/espeak-ng-data) + the Thorsten voice
 COPY --from=build /opt/piper   /opt/piper
 COPY --from=build /opt/voices  /app/voices
-RUN chmod +x /usr/local/bin/whisper-cli /opt/piper/piper
+RUN chmod +x /opt/whisper-cli-bin/whisper-cli /opt/piper/piper
 
 # non-secret defaults; secrets come from --env-file at run time (see deploy/.env.template)
 ENV CC_HOST=0.0.0.0 \
@@ -67,7 +77,8 @@ ENV CC_HOST=0.0.0.0 \
     CC_WHISPER_CLI=whisper-cli \
     CC_PIPER_BIN=/opt/piper/piper \
     CC_PIPER_MODEL=/app/voices/de_DE-thorsten-medium.onnx \
-    LD_LIBRARY_PATH=/opt/piper \
+    PATH=/opt/whisper-cli-bin:${PATH} \
+    LD_LIBRARY_PATH=/opt/whisper-cli-bin:/opt/piper \
     NODE_ENV=production
 
 EXPOSE 8791
