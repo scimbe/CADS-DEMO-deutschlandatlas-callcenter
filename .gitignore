@@ -7,3 +7,5 @@ __pycache__/
 tests/_tmp_*.wav
 *.wav
 .env
+gui/.run.env
+gui/.run.log

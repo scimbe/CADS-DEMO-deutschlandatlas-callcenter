@@ -39,8 +39,12 @@
   button.mic.on{background:var(--red);border-color:var(--red);color:#fff;animation:pulse 1.1s infinite}
   @keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(234,106,106,.5)}70%{box-shadow:0 0 0 9px rgba(234,106,106,0)}}
   .examples{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
-  .ex{font-size:.82rem;color:var(--dim);border:1px solid var(--line);background:rgba(255,255,255,.02);border-radius:999px;padding:.4em .8em;cursor:pointer}
+  .ex{font-size:.86rem;color:var(--dim);border:1px solid var(--line);background:rgba(255,255,255,.02);border-radius:999px;padding:.45em .85em;cursor:pointer;text-align:left}
   .ex:hover{color:var(--ink);border-color:rgba(255,255,255,.2)}
+  .ex.best{border-color:rgba(53,194,168,.5);color:var(--teal);font-weight:600}
+  .exnote{flex-basis:100%;width:100%;font-family:"IBM Plex Mono",monospace;font-size:.76rem;color:var(--dimmer);display:flex;align-items:center;gap:.5em;margin-bottom:2px}
+  .exnote .spin{width:9px;height:9px;border-radius:50%;border:1.5px solid var(--teal);border-top-color:transparent;animation:sp .8s linear infinite}
+  @keyframes sp{to{transform:rotate(360deg)}}
   .answer{margin-top:18px;border:1px solid var(--line);border-radius:14px;background:var(--panel);padding:18px;min-height:64px}
   .answer .q{font-family:"IBM Plex Mono",monospace;font-size:.78rem;color:var(--blue);margin-bottom:8px;display:flex;align-items:baseline;gap:.5em;flex-wrap:wrap}
   .answer .q b{color:var(--ink);font-weight:600;font-family:"Public Sans",sans-serif;font-size:.95rem}
@@ -65,8 +69,11 @@
   .funfact .h{font-family:"IBM Plex Mono",monospace;font-size:.68rem;text-transform:uppercase;letter-spacing:.1em;color:var(--blue);margin-bottom:5px;display:flex;align-items:center;gap:.4em}
   .funfact a{color:var(--blue);text-decoration:none;border-bottom:1px solid rgba(94,141,239,.4)}
   audio{display:none}
-  footer{margin-top:26px;padding-top:16px;border-top:1px solid var(--line);color:var(--dimmer);font-size:.8rem;display:flex;justify-content:space-between;gap:14px;flex-wrap:wrap}
-  footer a{color:var(--dim);text-decoration:none;border-bottom:1px solid var(--line)}
+  footer{margin-top:26px;padding-top:16px;border-top:1px solid var(--line);color:var(--dimmer);font-size:.8rem;display:flex;flex-direction:column;align-items:flex-start;gap:10px}
+  footer .fl{display:flex;gap:16px;flex-wrap:wrap;align-items:center}
+  footer a{color:var(--dim);text-decoration:none}
+  footer a:hover{color:var(--ink)}
+  footer .support{color:var(--teal);font-weight:600}
   @media (prefers-reduced-motion:reduce){*{animation-duration:.001ms!important}}
 </style>
 </head>
@@ -96,7 +103,6 @@
     <div class="q" id="qEcho"></div>
     <div class="a" id="a">Stellen Sie Ihre Frage oben.</div>
     <button class="replayBtn" id="replay">🔊 Antwort abspielen</button>
-    <div class="choices" id="choices"></div>
     <div class="src" id="src"><span class="tick">✓ geerdet</span><span id="srcTxt"></span></div>
     <div class="funfact" id="funfact"></div>
   </div>
@@ -104,8 +110,8 @@
   <audio id="filler"></audio>
 
   <footer>
-    <span>Antworten aus der Live-Deutschlandatlas-API · nichts erfunden</span>
-    <span><a href="https://bunsenbrenner.org" target="_blank" rel="noopener">bunsenbrenner.org</a> · served by customer</span>
+    <div class="fl"><a class="support" href="https://steady.page/plans/77a32d9c-c399-4ca1-9515-7a628c7a9413" target="_blank" rel="noopener">Als Mitglied unterstützen →</a><a class="support" href="https://buymeacoffee.com/bunsenbrenner" target="_blank" rel="noopener">Buy me a coffee →</a><a href="https://github.com/scimbe/CADS-Tunnel" target="_blank" rel="noopener">GitHub</a><a href="https://bunsenbrenner.org/legal-notice" target="_blank" rel="noopener">Legal Notice</a><a href="https://bunsenbrenner.org/privacy-policy" target="_blank" rel="noopener">Privacy Policy</a><a href="https://bunsenbrenner.org/terms-of-use" target="_blank" rel="noopener">Terms of Use</a></div>
+    <span>Antworten aus der Live-Deutschlandatlas-API · nichts erfunden · <a href="https://bunsenbrenner.org" target="_blank" rel="noopener">bunsenbrenner.org</a></span>
   </footer>
 </div>
 
@@ -148,7 +154,11 @@
   const EX_POOL=['Wie hoch ist die Straftatenquote in Kiel?','Wie viele Schulabgänger in Kiel haben keinen Hauptschulabschluss?','Wie viele Arbeitslose gibt es in Dresden?','Wie hoch ist die Arbeitslosenquote in Leipzig?','Wie viele Ärzte gibt es je 100.000 Einwohner in München?','Wie hoch ist die Steuereinnahmekraft in Hamburg?','Wie ist die Breitbandversorgung in Rostock?','Wie hoch ist der Ausländeranteil in Frankfurt?','Wie viele Ladepunkte für Elektroautos gibt es in Stuttgart?','Wie hoch ist die Kriminalitätsrate in Dortmund?','Wie hoch ist die Bevölkerungsdichte in Bremen?','Wie viele Straftaten pro 100.000 Einwohner gibt es in Hannover?'];
   const exWrap=document.getElementById('examples');
   function shuffle(a){a=a.slice();for(let i=a.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[a[i],a[j]]=[a[j],a[i]];}return a;}
-  function renderExamples(){exWrap.innerHTML='';shuffle(EX_POOL).slice(0,3).forEach(x=>{const b=document.createElement('button');b.className='ex';b.textContent=x;b.onclick=()=>{q.value=x;ask();};exWrap.appendChild(b);});}
+  // ONE place for suggestions: the bubble row. Examples, clarify options, and follow-ups all render here.
+  function renderBubbles(items, noteHtml){exWrap.innerHTML='';
+    if(noteHtml){const n=document.createElement('div');n.className='exnote';n.innerHTML=noteHtml;exWrap.appendChild(n);}
+    items.forEach(it=>{const b=document.createElement('button');b.className='ex'+(it.best?' best':'');b.textContent=it.label;b.onclick=it.onClick;exWrap.appendChild(b);});}
+  function renderExamples(){renderBubbles(shuffle(EX_POOL).slice(0,3).map(x=>({label:x,onClick:()=>{q.value=x;ask();}})));}
   renderExamples();
 
   // instant spoken filler in THE Thorsten voice (pre-rendered, varied for naturalness) — bridges the compute wait
@@ -171,27 +181,26 @@
 
   function playAnswer(url){
     stopFiller();
-    if(!url){speaking=false;setState('done');return;}
+    if(!url){speaking=false;setState('done');answerDone=true;drainSpeak();return;}
     player.src=url;replay.style.display='none';
     player.onplay=()=>{speaking=true;setState('speak');};
-    player.onended=()=>{speaking=false;setState('done');};
+    player.onended=()=>{speaking=false;setState('done');answerDone=true;drainSpeak();};
     player.play().catch(()=>{replay.style.display='inline-block';
       replay.onclick=()=>{player.play().then(()=>{replay.style.display='none';}).catch(()=>{});};});
   }
 
-  const choicesEl=document.getElementById('choices');
   let lastQuery=null,lastAnswer=null;   // conversation context for follow-ups
-  function clearChoices(){choicesEl.style.display='none';choicesEl.innerHTML='';}
-  function renderChoices(items, noteHtml, isFollowup){
-    choicesEl.innerHTML='';
-    if(noteHtml){const n=document.createElement('div');n.className='note';n.innerHTML=noteHtml;choicesEl.appendChild(n);}
-    items.forEach(it=>{const b=document.createElement('button');b.className='choice'+(it.best?' best':'');
-      b.innerHTML=(it.best?'<b>'+it.label+'</b>':it.label)+(it.hint?'<small>'+it.hint+'</small>':'');
-      b.onclick=()=>{clearChoices();deliver(it.query, !!isFollowup);};choicesEl.appendChild(b);});
-    choicesEl.style.display='flex';}
   const ffEl=document.getElementById('funfact');
-  function reset(){src.style.display='none';src.classList.remove('refuse');replay.style.display='none';ffEl.style.display='none';clearChoices();}
+  function reset(){src.style.display='none';src.classList.remove('refuse');replay.style.display='none';ffEl.style.display='none';}
   function playClip(url){try{stopFiller();fillerEl.src=url;fillerEl.play().catch(()=>{});}catch(e){}}
+
+  // sequential Thorsten voice queue AFTER the answer audio: fun fact first, then the follow-up invite
+  let speakQ=[], speaking2=false, answerDone=false;
+  function queueSpeak(url){ if(url){ speakQ.push(url); if(answerDone) drainSpeak(); } }
+  function drainSpeak(){ if(speaking2||!speakQ.length) return; speaking2=true; const u=speakQ.shift();
+    try{ stopFiller(); fillerEl.src=u; fillerEl.onended=()=>{ speaking2=false; drainSpeak(); };
+      fillerEl.play().catch(()=>{ speaking2=false; drainSpeak(); }); }
+    catch(e){ speaking2=false; drainSpeak(); } }
 
   // phase 1 — understand & guide (targeted clarifying question; speculation starts server-side)
   async function ask(){
@@ -207,9 +216,9 @@
       stopFiller(); setState('idle');
       aEl.className='a'; aEl.textContent=u.clarify||'Können Sie Ihre Frage etwas genauer stellen?';
       if(u.clarifyAudioUrl) playClip(u.clarifyAudioUrl);
-      const items=[]; if(u.best_guess) items.push({label:u.best_guess,query:u.best_guess,best:true,hint:'wahrscheinlich gemeint — antwortet sofort'});
-      (u.options||[]).forEach(o=>{ if(o&&o!==u.best_guess) items.push({label:o,query:o}); });
-      renderChoices(items,'<span class="spin"></span>Die wahrscheinlichste Antwort wird bereits im Hintergrund vorbereitet …');
+      const items=[]; if(u.best_guess) items.push({label:u.best_guess,best:true,onClick:()=>deliver(u.best_guess,false)});
+      (u.options||[]).forEach(o=>{ if(o&&o!==u.best_guess) items.push({label:o,onClick:()=>deliver(o,false)}); });
+      renderBubbles(items,'<span class="spin"></span>Wahrscheinlichste Antwort wird bereits vorbereitet …');
       q.value=''; q.focus();
     }catch(e){go.disabled=false;q.disabled=false;stopWait();aEl.className='a';aEl.textContent='Verbindungsfehler: '+e.message;setState('done');}
   }
@@ -217,6 +226,7 @@
   // phase 2 — deliver the grounded answer (instant when it was speculated)
   async function deliver(query, isFollowup){
     go.disabled=true; q.disabled=true; reset(); playFiller();
+    speakQ=[]; speaking2=false; answerDone=false;   // fresh spoken queue for this answer
     qEcho.innerHTML='<span>'+(isFollowup?'Weiter gefragt:':'Frage:')+'</span> <b></b>'; qEcho.querySelector('b').textContent=query;
     aEl.className='a working'; aEl.textContent='Ich hole die Antwort …'; setState('query'); startWait();
     try{
@@ -231,11 +241,12 @@
           else{src.querySelector('.tick').textContent='✓ geerdet · Live-Quelle';
             srcTxt.innerHTML=`<span class="pill">${m.table||'—'}</span> <span class="pill">${m.place_resolved||m.place_name_requested||''}</span> <span class="pill">${m.live_rows_used||0} Live-Zeile(n)</span>`;}
         }
-        if(d.funfact&&d.funfact.text){ffEl.style.display='block';ffEl.innerHTML='<div class="h">💡 Wussten Sie schon?</div>'+d.funfact.text+' <a href="'+d.funfact.url+'" target="_blank" rel="noopener">Quelle: Wikipedia</a>';}
+        if(d.funfact&&d.funfact.text){ffEl.style.display='block';ffEl.innerHTML='<div class="h">💡 Wussten Sie schon?</div>'+d.funfact.text+' <a href="'+d.funfact.url+'" target="_blank" rel="noopener">Quelle: Wikipedia</a>';
+          queueSpeak(d.funfact.audioUrl);}   // Thorsten speaks the fun fact, right after the answer
         if(!d.audioUrl){setTimeout(()=>setState('done'),800);}
         lastQuery=query; lastAnswer=ans;
         go.disabled=false; q.disabled=false;
-        doFollowup(query, ans); renderExamples();
+        doFollowup(query, ans);
       });
     }catch(e){stopWait();aEl.className='a';aEl.textContent='Verbindungsfehler: '+e.message;setState('done');go.disabled=false;q.disabled=false;}
   }
@@ -244,10 +255,9 @@
   async function doFollowup(query, answer){
     try{
       const f=await (await fetch('/followup',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({query,answer})})).json();
-      const items=(f.suggestions||[]).map(s=>({label:s,query:s}));
-      if(items.length) renderChoices(items,'💬 '+(f.invite||'Möchten Sie noch etwas wissen?'), true);
-      const speakInvite=()=>{ if(f.inviteAudioUrl) playClip(f.inviteAudioUrl); };
-      if(f.inviteAudioUrl){ if(player.src && !player.paused && !player.ended){ player.addEventListener('ended',speakInvite,{once:true}); } else speakInvite(); }
+      const items=(f.suggestions||[]).map(s=>({label:s,onClick:()=>deliver(s,true)}));
+      if(items.length) renderBubbles(items,'💬 '+(f.invite||'Möchten Sie noch etwas wissen?')); else renderExamples();
+      queueSpeak(f.inviteAudioUrl);   // spoken after answer + fun fact, in that order
     }catch(e){}
   }
 

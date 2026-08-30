@@ -132,9 +132,13 @@ function answerFor(query) {
     const [r, funfact] = await Promise.all([runPipeline(key), wikiFunFact(placeFromQuery(key))]);  // Wikipedia in parallel
     const answer = r.final?.text || r.final?.answer || null;
     const meta = r.final?.meta || null;
-    let au = null;
-    if (answer) { try { au = await ttsSpeak(answer, 'primary'); } catch {} }
-    return { ok: r.ok, answer, meta, audioUrl: proxied(au), funfact, err: r.ok ? null : (r.err || 'pipeline failed') };
+    let au = null, ffAu = null;
+    await Promise.all([                                              // answer + fun-fact spoken in parallel (both Thorsten)
+      answer ? ttsSpeak(answer, 'primary').then((u) => { au = u; }, () => {}) : Promise.resolve(),
+      funfact ? ttsSpeak(funfact.text, 'primary').then((u) => { ffAu = u; }, () => {}) : Promise.resolve(),
+    ]);
+    const ff = funfact ? { ...funfact, audioUrl: proxied(ffAu) } : null;
+    return { ok: r.ok, answer, meta, audioUrl: proxied(au), funfact: ff, err: r.ok ? null : (r.err || 'pipeline failed') };
   })();
   specCache.set(key, promise);
   if (specCache.size > 24) specCache.delete(specCache.keys().next().value);
@@ -188,12 +192,19 @@ async function understand(query, context) {
 const FOLLOWUP_SYS = [
   'Du bist ein deutsches Sprach-Callcenter für Deutschlandatlas-Regionaldaten und führst ein',
   'LAUFENDES Gespräch fort (kein neuer Kontakt). Der Anrufer hat gerade eine Antwort erhalten.',
-  'Biete IMMER passende Anschlussfragen an (gleicher Ort, verwandtes Thema, oder derselbe Indikator',
-  'für einen Vergleichsort). Antworte NUR mit striktem JSON, ohne Erklärung:',
+  'Biete IMMER passende Anschlussfragen an. WICHTIG: Jede vorgeschlagene Anschlussfrage MUSS sich',
+  'mit den vorhandenen Daten TATSÄCHLICH beantworten lassen. Bevorzuge deshalb genau diese beiden',
+  'sicheren Muster:',
+  '  (A) DERSELBE Indikator wie gerade eben, aber für eine andere vergleichbare Stadt/einen Kreis',
+  '      (gerade "Arbeitslosenquote Kiel" -> "... in Lübeck?" / "... in Flensburg?").',
+  '  (B) ein ANDERER, in der Liste unten aufgeführter Indikator für DENSELBEN Ort.',
+  'Erfinde KEINE Kennzahlen, die es in der Liste nicht gibt, und frage NICHT nach absoluten Zahlen,',
+  'wenn nur Quoten/Anteile vorliegen. Antworte NUR mit striktem JSON, ohne Erklärung:',
   '{"invite": string,        // eine EINZELNE, VOLLSTÄNDIG AUSFORMULIERTE gesprochene Anschlussfrage,',
   '                          // die an das Gespräch anknüpft. NIEMALS bei "zum Beispiel" oder ":" aufhören.',
-  '                          // z.B. "Möchten Sie auch wissen, wie hoch die Arbeitslosenquote in Kiel ist?"',
-  ' "suggestions": [string]} // 2-3 konkrete Anschlussfragen als vollständige deutsche Fragesätze (je Indikator + Ort)',
+  '                          // z.B. "Möchten Sie auch wissen, wie hoch die Arbeitslosenquote in Lübeck ist?"',
+  ' "suggestions": [string]} // 3-5 konkrete Anschlussfragen als vollständige deutsche Fragesätze,',
+  '                          //   jede nach Muster (A) oder (B), jede sicher aus den Daten beantwortbar.',
 ].join('\n');
 async function followup(query, answer) {
   const sys = FOLLOWUP_SYS + (CATALOG_SUMMARY
@@ -201,8 +212,21 @@ async function followup(query, answer) {
   const u = await llmJSON(sys, 'Beantwortete Frage: ' + query + '\nGegebene Antwort: ' + (answer || ''));
   return {
     invite: (u.invite || 'Möchten Sie noch etwas wissen?').toString(),
-    suggestions: Array.isArray(u.suggestions) ? u.suggestions.filter((x) => typeof x === 'string').slice(0, 3) : [],
+    suggestions: Array.isArray(u.suggestions) ? u.suggestions.filter((x) => typeof x === 'string').slice(0, 5) : [],
   };
+}
+
+// only keep follow-up suggestions the pipeline can actually answer with real data (bounded wait; raw fallback)
+async function validateSuggestions(suggestions, want = 3, timeoutMs = 22000) {
+  if (!suggestions.length) return [];
+  const checks = suggestions.map((s) => answerFor(s)
+    .then((r) => ({ s, ok: !!(r && r.ok && r.meta && r.meta.has_real_data !== false && r.meta.table) }))
+    .catch(() => ({ s, ok: false })));
+  const timeout = new Promise((res) => setTimeout(() => res(null), timeoutMs));
+  const settled = await Promise.race([Promise.all(checks), timeout]);
+  if (!settled) return suggestions.slice(0, want);          // timed out -> fall back to grounded raw
+  const good = settled.filter((x) => x.ok).map((x) => x.s);
+  return good.length ? good.slice(0, want) : suggestions.slice(0, want);
 }
 
 async function readBody(req) { let b = ''; for await (const c of req) b += c; try { return JSON.parse(b); } catch { return {}; } }
@@ -241,10 +265,11 @@ const server = createServer(async (req, res) => {
     const query = (b.query || '').toString().slice(0, 300);
     if (!query.trim()) return jsonRes(res, 400, { error: 'empty query' });
     const f = await followup(query, (b.answer || '').toString().slice(0, 600));
+    f.suggestions.forEach((s) => answerFor(s));   // start speculation for all candidates
+    const validated = await validateSuggestions(f.suggestions, 3);   // keep only answerable ones (bounded)
     let inviteAudioUrl = null;
     if (f.invite) { try { inviteAudioUrl = proxied(await ttsSpeak(f.invite, 'primary')); } catch {} }
-    f.suggestions.forEach((s) => answerFor(s));   // pre-speculate the follow-ups too
-    return jsonRes(res, 200, { ...f, inviteAudioUrl });
+    return jsonRes(res, 200, { ...f, suggestions: validated, inviteAudioUrl });
   }
   if (req.method === 'GET' && /^\/fillers\/filler[1-9]\.wav$/.test(req.url)) {
     try { res.writeHead(200, { 'content-type': 'audio/wav', 'cache-control': 'public, max-age=3600' }); res.end(await readFile(join(__dir, req.url.replace(/^\//, '')))); }
