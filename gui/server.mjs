@@ -15,9 +15,10 @@
 //      + CT_AUDIO_CHANNEL_ID for spoken answers.
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
-import { readFile } from 'node:fs/promises';
+import { readFile, writeFile, rm } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { tmpdir } from 'node:os';
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dir, '..');
@@ -59,6 +60,29 @@ function ttsSpeak(text, voice = 'primary') {
   });
 }
 const proxied = (u) => (u ? '/audio?u=' + encodeURIComponent(u) : null);
+
+// --- server-side speech-to-text via local whisper.cpp (no browser cloud dependency) ---
+let sttSeq = 0;
+function run(cmd, args) {
+  return new Promise((resolve) => {
+    const p = spawn(cmd, args); let out = '', err = '';
+    p.stdout.on('data', (d) => (out += d)); p.stderr.on('data', (d) => (err += d));
+    p.on('close', (code) => resolve({ code, out, err })); p.on('error', () => resolve({ code: -1, out, err }));
+  });
+}
+async function transcribe(buf) {
+  const model = process.env.CC_WHISPER_MODEL, cli = process.env.CC_WHISPER_CLI || 'whisper-cli';
+  if (!model || !buf || !buf.length) return '';
+  const base = join(tmpdir(), 'cc-stt-' + process.pid + '-' + (sttSeq++));
+  const inp = base + '.in', wav = base + '.wav';
+  try {
+    await writeFile(inp, buf);
+    if ((await run('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-i', inp, '-ar', '16000', '-ac', '1', wav, '-y'])).code !== 0) return '';
+    const w = await run(cli, ['-m', model, '-l', 'de', '-nt', '-f', wav]);
+    return (w.out || '').replace(/\[[0-9:.\s>\-]+\]/g, '').replace(/\s+/g, ' ').trim();
+  } catch { return ''; }
+  finally { rm(inp, { force: true }).catch(() => {}); rm(wav, { force: true }).catch(() => {}); }
+}
 
 // --- speculation cache: query -> Promise<{ok,answer,meta,audioUrl,err}> ---
 const specCache = new Map();
@@ -118,10 +142,13 @@ async function understand(query) {
 }
 
 const FOLLOWUP_SYS = [
-  'Du bist ein deutsches Sprach-Callcenter für Deutschlandatlas-Regionaldaten. Der Anrufer hat gerade',
-  'eine Antwort erhalten. Biete IMMER passende Anschlussfragen an (gleicher Ort, verwandtes Thema, oder',
-  'derselbe Indikator für einen Vergleichsort). Antworte NUR mit striktem JSON, ohne Erklärung:',
-  '{"invite": string,        // kurze, freundliche gesprochene Einladung, z.B. "Möchten Sie noch etwas über Kiel wissen? Zum Beispiel:"',
+  'Du bist ein deutsches Sprach-Callcenter für Deutschlandatlas-Regionaldaten und führst ein',
+  'LAUFENDES Gespräch fort (kein neuer Kontakt). Der Anrufer hat gerade eine Antwort erhalten.',
+  'Biete IMMER passende Anschlussfragen an (gleicher Ort, verwandtes Thema, oder derselbe Indikator',
+  'für einen Vergleichsort). Antworte NUR mit striktem JSON, ohne Erklärung:',
+  '{"invite": string,        // eine EINZELNE, VOLLSTÄNDIG AUSFORMULIERTE gesprochene Anschlussfrage,',
+  '                          // die an das Gespräch anknüpft. NIEMALS bei "zum Beispiel" oder ":" aufhören.',
+  '                          // z.B. "Möchten Sie auch wissen, wie hoch die Arbeitslosenquote in Kiel ist?"',
   ' "suggestions": [string]} // 2-3 konkrete Anschlussfragen als vollständige deutsche Fragesätze (je Indikator + Ort)',
 ].join('\n');
 async function followup(query, answer) {
@@ -149,6 +176,12 @@ const server = createServer(async (req, res) => {
     let clarifyAudioUrl = null;
     if (!u.precise && u.clarify) { try { clarifyAudioUrl = proxied(await ttsSpeak(u.clarify, 'primary')); } catch {} }
     return jsonRes(res, 200, { ...u, clarifyAudioUrl });
+  }
+  if (req.method === 'POST' && req.url === '/stt') {
+    const chunks = [];
+    for await (const c of req) chunks.push(c);
+    const text = await transcribe(Buffer.concat(chunks));
+    return jsonRes(res, 200, { text });
   }
   if (req.method === 'POST' && (req.url === '/answer' || req.url === '/ask')) {
     const query = ((await readBody(req)).query || '').toString().slice(0, 300);
