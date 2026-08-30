@@ -461,4 +461,5 @@ const server = createServer(async (req, res) => {
   }
   res.writeHead(404); res.end('not found');
 });
-server.listen(PORT, '127.0.0.1', () => console.log(`callcenter GUI on http://127.0.0.1:${PORT}`));
+const HOST = process.env.CC_HOST || '127.0.0.1';   // default local-only; set CC_HOST=0.0.0.0 in a container fronted by a tunnel
+server.listen(PORT, HOST, () => console.log(`callcenter GUI on http://${HOST}:${PORT}`));
