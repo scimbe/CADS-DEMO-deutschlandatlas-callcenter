@@ -94,6 +94,15 @@ const server = createServer(async (req, res) => {
     });
     return;
   }
+  // Pre-rendered Thorsten filler clips (varied, played instantly while the pipeline runs).
+  if (req.method === 'GET' && /^\/fillers\/filler[1-9]\.wav$/.test(req.url)) {
+    try {
+      const f = await readFile(join(__dir, req.url.replace(/^\//, '')));
+      res.writeHead(200, { 'content-type': 'audio/wav', 'cache-control': 'public, max-age=3600' });
+      res.end(f);
+    } catch { res.writeHead(404); res.end('no filler'); }
+    return;
+  }
   // Same-origin proxy for the TTS audio (a cross-origin <audio> routed through Web Audio is
   // tainted -> silent; served here same-origin it just plays). Only proxies bunsenbrenner.org.
   if (req.method === 'GET' && req.url.startsWith('/audio?')) {
