@@ -16,7 +16,7 @@
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
 import { readFile, writeFile, rm } from 'node:fs/promises';
-import { readFileSync } from 'node:fs';
+import { readFileSync, mkdirSync, existsSync, readdirSync, unlinkSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -69,9 +69,37 @@ function stripPronunciation(text) {
     .trim();
 }
 
+// Self-contained local TTS via Piper (used on the durable host; no ct-agent channel/grant needed).
+// Writes a WAV under a capped temp dir and returns a same-origin /tts/<id>.wav path.
+const TTS_DIR = join(tmpdir(), 'cc-tts');
+let ttsSeq = 0;
+function pruneTtsDir(keep = 100) {
+  try {
+    const files = readdirSync(TTS_DIR).filter((f) => f.endsWith('.wav'))
+      .map((f) => ({ f, t: statSync(join(TTS_DIR, f)).mtimeMs })).sort((a, b) => b.t - a.t);
+    for (const { f } of files.slice(keep)) { try { unlinkSync(join(TTS_DIR, f)); } catch {} }
+  } catch {}
+}
+function ttsLocalPiper(text) {
+  return new Promise((resolve) => {
+    try { mkdirSync(TTS_DIR, { recursive: true }); } catch {}
+    const id = process.pid + '-' + (ttsSeq++);
+    const wav = join(TTS_DIR, id + '.wav');
+    let done = false; const fin = (v) => { if (!done) { done = true; resolve(v); } };
+    try {
+      const p = spawn(process.env.CC_PIPER_BIN, ['--model', process.env.CC_PIPER_MODEL, '--output_file', wav], { env: process.env });
+      p.stdin.on('error', () => {});
+      p.stdin.end(text);
+      p.on('close', (code) => { pruneTtsDir(); fin(code === 0 && existsSync(wav) ? '/tts/' + id + '.wav' : null); });
+      p.on('error', () => fin(null));
+    } catch { fin(null); }
+  });
+}
+
 function ttsSpeak(text, voice = 'primary') {
   text = stripPronunciation(text);
   if (process.env.CC_TTS !== '1') return Promise.resolve(null);
+  if (process.env.CC_PIPER_BIN && process.env.CC_PIPER_MODEL) return ttsLocalPiper(text);   // local Piper (durable host) — no channel
   const CT = process.env.CT_AGENT_BIN, RELAY = process.env.CT_RELAY_ENV, CH = process.env.CT_AUDIO_CHANNEL_ID;
   if (!CT || !RELAY || !CH) return Promise.resolve(null);
   return new Promise((resolve) => {
@@ -89,7 +117,7 @@ function ttsSpeak(text, voice = 'primary') {
     p.on('error', () => resolve(null));
   });
 }
-const proxied = (u) => (u ? '/audio?u=' + encodeURIComponent(u) : null);
+const proxied = (u) => (u ? (u.startsWith('/') ? u : '/audio?u=' + encodeURIComponent(u)) : null);
 
 // --- server-side speech-to-text via local whisper.cpp (no browser cloud dependency) ---
 let sttSeq = 0;
@@ -445,6 +473,11 @@ const server = createServer(async (req, res) => {
   if (req.method === 'GET' && /^\/fillers\/filler[1-9]\.wav$/.test(req.url)) {
     try { res.writeHead(200, { 'content-type': 'audio/wav', 'cache-control': 'public, max-age=3600' }); res.end(await readFile(join(__dir, req.url.replace(/^\//, '')))); }
     catch { res.writeHead(404); res.end('no filler'); }
+    return;
+  }
+  if (req.method === 'GET' && /^\/tts\/[\w.-]+\.wav$/.test(req.url)) {
+    try { res.writeHead(200, { 'content-type': 'audio/wav', 'cache-control': 'no-store' }); res.end(await readFile(join(TTS_DIR, req.url.replace('/tts/', '')))); }
+    catch { res.writeHead(404); res.end('no tts'); }
     return;
   }
   if (req.method === 'GET' && req.url.startsWith('/audio?')) {
