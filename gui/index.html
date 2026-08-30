@@ -49,6 +49,15 @@
   .answer .a .cursor{display:inline-block;width:.5ch;height:1.05em;vertical-align:-.15em;background:var(--teal);margin-left:1px;animation:blink 1s steps(1) infinite}
   @keyframes blink{50%{opacity:0}}
   .replayBtn{margin-top:10px;display:none;font-size:.85rem;padding:.5em .9em}
+  .choices{display:none;flex-direction:column;gap:8px;margin-top:14px}
+  .choices .note{font-size:.78rem;color:var(--dimmer);font-family:"IBM Plex Mono",monospace;display:flex;align-items:center;gap:.5em}
+  .choices .note .spin{width:9px;height:9px;border-radius:50%;border:1.5px solid var(--teal);border-top-color:transparent;animation:sp .8s linear infinite}
+  @keyframes sp{to{transform:rotate(360deg)}}
+  .choice{text-align:left;font-size:.94rem;padding:.62em .85em;border:1px solid var(--line);background:rgba(255,255,255,.03);border-radius:10px;color:var(--ink);cursor:pointer;transition:all .15s}
+  .choice:hover{background:rgba(255,255,255,.08);border-color:rgba(255,255,255,.22)}
+  .choice.best{border-color:rgba(53,194,168,.5)}
+  .choice.best b{color:var(--teal)}
+  .choice small{display:block;color:var(--dimmer);font-family:"IBM Plex Mono",monospace;font-size:.68rem;margin-top:2px}
   .src{margin-top:12px;font-family:"IBM Plex Mono",monospace;font-size:.74rem;color:var(--dim);border-top:1px dashed var(--line);padding-top:10px;display:none;align-items:center;gap:.6em;flex-wrap:wrap}
   .src .tick{color:var(--teal)} .src.refuse .tick{color:var(--amber)}
   .src .pill{border:1px solid var(--line);border-radius:6px;padding:.15em .5em;color:var(--ink)}
@@ -84,6 +93,7 @@
     <div class="q" id="qEcho"></div>
     <div class="a" id="a">Stellen Sie Ihre Frage oben.</div>
     <button class="replayBtn" id="replay">🔊 Antwort abspielen</button>
+    <div class="choices" id="choices"></div>
     <div class="src" id="src"><span class="tick">✓ geerdet</span><span id="srcTxt"></span></div>
   </div>
   <audio id="player"></audio>
@@ -163,32 +173,74 @@
       replay.onclick=()=>{player.play().then(()=>{replay.style.display='none';}).catch(()=>{});};});
   }
 
+  const choicesEl=document.getElementById('choices');
+  function clearChoices(){choicesEl.style.display='none';choicesEl.innerHTML='';}
+  function renderChoices(items, noteHtml){
+    choicesEl.innerHTML='';
+    if(noteHtml){const n=document.createElement('div');n.className='note';n.innerHTML=noteHtml;choicesEl.appendChild(n);}
+    items.forEach(it=>{const b=document.createElement('button');b.className='choice'+(it.best?' best':'');
+      b.innerHTML=(it.best?'<b>'+it.label+'</b>':it.label)+(it.hint?'<small>'+it.hint+'</small>':'');
+      b.onclick=()=>{clearChoices();deliver(it.query);};choicesEl.appendChild(b);});
+    choicesEl.style.display='flex';}
+  function reset(){src.style.display='none';src.classList.remove('refuse');replay.style.display='none';clearChoices();}
+  function playClip(url){try{stopFiller();fillerEl.src=url;fillerEl.play().catch(()=>{});}catch(e){}}
+
+  // phase 1 — understand & guide (targeted clarifying question; speculation starts server-side)
   async function ask(){
     const query=q.value.trim(); if(!query) return;
-    go.disabled=true; q.disabled=true; src.style.display='none'; src.classList.remove('refuse'); replay.style.display='none';
-    stopFiller();
+    go.disabled=true; q.disabled=true; reset(); stopFiller();
     qEcho.innerHTML='<span>Ihre Frage:</span> <b></b>'; qEcho.querySelector('b').textContent=query;
-    playFiller();
-    setState('listen'); startWait();
-    setTimeout(()=>setState('think'),700); setTimeout(()=>setState('query'),1800);
+    playFiller(); setState('listen'); aEl.className='a working'; aEl.textContent='Ich verstehe Ihre Frage …';
+    setTimeout(()=>setState('think'),500);
     try{
-      const r=await fetch('/ask',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({query})});
-      const d=await r.json();
+      const u=await (await fetch('/understand',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({query})})).json();
+      go.disabled=false; q.disabled=false;
+      if(u.precise){ deliver(u.best_guess); return; }
+      stopFiller(); setState('idle');
+      aEl.className='a'; aEl.textContent=u.clarify||'Können Sie Ihre Frage etwas genauer stellen?';
+      if(u.clarifyAudioUrl) playClip(u.clarifyAudioUrl);
+      const items=[]; if(u.best_guess) items.push({label:u.best_guess,query:u.best_guess,best:true,hint:'wahrscheinlich gemeint — antwortet sofort'});
+      (u.options||[]).forEach(o=>{ if(o&&o!==u.best_guess) items.push({label:o,query:o}); });
+      renderChoices(items,'<span class="spin"></span>Die wahrscheinlichste Antwort wird bereits im Hintergrund vorbereitet …');
+      q.value=''; q.focus();
+    }catch(e){go.disabled=false;q.disabled=false;stopWait();aEl.className='a';aEl.textContent='Verbindungsfehler: '+e.message;setState('done');}
+  }
+
+  // phase 2 — deliver the grounded answer (instant when it was speculated)
+  async function deliver(query){
+    go.disabled=true; q.disabled=true; reset(); playFiller();
+    qEcho.innerHTML='<span>Frage:</span> <b></b>'; qEcho.querySelector('b').textContent=query;
+    aEl.className='a working'; aEl.textContent='Ich hole die Antwort …'; setState('query'); startWait();
+    try{
+      const d=await (await fetch('/answer',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({query})})).json();
       stopWait();
       const ans=d.answer||d.error||'Dazu habe ich leider keine Antwort erhalten.';
       const matched=d.meta?(d.meta.has_real_data!==false && !!d.meta.table):true;
       setState('speak'); playAnswer(d.audioUrl);
       type(aEl,ans,()=>{
         if(d.meta){const m=d.meta;src.style.display='flex';
-          if(!matched){src.classList.add('refuse');src.querySelector('.tick').textContent='⚠ ehrliche Ablehnung';srcTxt.textContent='keine passende Live-Tabelle im Datensatz';}
+          if(!matched){src.classList.add('refuse');src.querySelector('.tick').textContent='⚠ Näherung';srcTxt.textContent='keine exakten Daten — beste verfügbare Näherung';}
           else{src.querySelector('.tick').textContent='✓ geerdet · Live-Quelle';
             srcTxt.innerHTML=`<span class="pill">${m.table||'—'}</span> <span class="pill">${m.place_resolved||m.place_name_requested||''}</span> <span class="pill">${m.live_rows_used||0} Live-Zeile(n)</span>`;}
         }
         if(!d.audioUrl){setTimeout(()=>setState('done'),800);}
         go.disabled=false; q.disabled=false;
+        doFollowup(query, ans);
       });
     }catch(e){stopWait();aEl.className='a';aEl.textContent='Verbindungsfehler: '+e.message;setState('done');go.disabled=false;q.disabled=false;}
   }
+
+  // always offer a spoken follow-up + suggestion chips after an answer
+  async function doFollowup(query, answer){
+    try{
+      const f=await (await fetch('/followup',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({query,answer})})).json();
+      const items=(f.suggestions||[]).map(s=>({label:s,query:s}));
+      if(items.length) renderChoices(items,'💬 '+(f.invite||'Möchten Sie noch etwas wissen?'));
+      const speakInvite=()=>{ if(f.inviteAudioUrl) playClip(f.inviteAudioUrl); };
+      if(f.inviteAudioUrl){ if(player.src && !player.paused && !player.ended){ player.addEventListener('ended',speakInvite,{once:true}); } else speakInvite(); }
+    }catch(e){}
+  }
+
   go.onclick=ask; q.addEventListener('keydown',e=>{if(e.key==='Enter')ask();});
 
   const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
