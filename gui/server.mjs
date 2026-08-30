@@ -225,23 +225,49 @@ const UNDERSTAND_SYS = [
   'Finanzen, Infrastruktur). Der Datensatz liefert pro Ort je einen Indikator, oft als Quote/Anteil',
   'bzw. je 100.000 Einwohner. Deine Aufgabe: den Anrufer mit einer gezielten Rückfrage zu EINER',
   'sauberen Anfrage führen (genau ein Indikator + ein Ort) und die wahrscheinlichste Absicht raten.',
+  'Es gibt ein GEDÄCHTNIS der bisherigen Turns. Entscheide zuerst, ob die neue Eingabe eine',
+  'NEUE, eigenständige Frage ist ("neu") oder ein ANSCHLUSS an den letzten Turn ("anschluss") —',
+  'letzteres bei kurzen/elliptischen Eingaben, die nur einen Teil ändern oder ergänzen',
+  '(z.B. "und in Hamburg?" = anderer Ort, selber Indikator; "und die Kriminalität?" = anderer',
+  'Indikator, selber Ort; "ja bitte", "und dort?", "wie viele genau?"). Bei "anschluss" MUSST du',
+  'die neue Eingabe MIT dem Gedächtnis zu EINER vollständigen, eigenständigen Frage auflösen:',
+  'fehlt der Ort, nimm den zuletzt genannten Ort; fehlt der Indikator, nimm den zuletzt genannten',
+  'Indikator. Kurze Zusatzinfos beziehen sich immer auf die zuletzt beantwortete Frage.',
   'Antworte NUR mit striktem JSON, ohne Erklärung, ohne Markdown:',
-  '{"precise": boolean,   // true nur wenn genau EIN Indikator UND ein Ort eindeutig erkennbar sind',
+  '{"kind": "neu" | "anschluss",  // Klassifikation der neuen Eingabe',
+  ' "precise": boolean,   // true nur wenn (nach Auflösung) genau EIN Indikator UND ein Ort eindeutig sind',
   ' "clarify": string,    // EINE kurze, freundliche deutsche Rückfrage, die zur sauberen Anfrage führt (leer wenn precise=true)',
-  ' "best_guess": string, // die wahrscheinlichste konkrete Frage als vollständiger deutscher Fragesatz (Indikator + Ort); IMMER gesetzt',
+  ' "best_guess": string, // die vollständige, AUFGELÖSTE konkrete Frage als deutscher Fragesatz (Indikator + Ort); IMMER gesetzt',
   ' "options": [string]}  // 2-3 konkrete alternative Fragesätze zur Auswahl (je Indikator + Ort)',
-  'Fehlt der Ort, frage gezielt nach dem Ort. Ist das Thema unklar, biete die naheliegendsten Indikatoren an.',
+  'Fehlt der Ort auch nach Auflösung, frage gezielt nach dem Ort. Ist das Thema unklar, biete die naheliegendsten Indikatoren an.',
 ].join('\n');
+
+// Build a compact multi-turn memory string from the conversation history (most recent last).
+function memoryBlock(context) {
+  if (!context) return '';
+  const hist = Array.isArray(context.history) ? context.history.slice(-4) : [];
+  const lines = [];
+  hist.forEach((h, i) => {
+    if (!h || !h.q) return;
+    const a = h.answer ? ' → ' + String(h.answer).slice(0, 160) : '';
+    lines.push(`  ${i + 1}. Frage: "${h.q}"${h.place ? ' [Ort: ' + h.place + ']' : ''}${a}`);
+  });
+  // fall back to the single last turn if no structured history was sent
+  if (!lines.length && context.lastQuery) {
+    lines.push(`  1. Frage: "${context.lastQuery}"` + (context.lastAnswer ? ' → ' + String(context.lastAnswer).slice(0, 160) : ''));
+  }
+  if (!lines.length) return '';
+  return 'GEDÄCHTNIS (bisherige Turns, ältester zuerst, neuester zuletzt):\n' + lines.join('\n')
+    + '\nDer letzte Turn ist der Bezugspunkt für Anschlüsse.\n\n';
+}
 
 async function understand(query, context) {
   const sys = UNDERSTAND_SYS + (CATALOG_SUMMARY
     ? '\n\nVERFÜGBARE INDIKATOREN — best_guess und options MÜSSEN sich mit einem davon beantworten lassen:\n' + CATALOG_SUMMARY : '');
-  const ctx = context && context.lastQuery
-    ? 'Laufendes Gespräch. Vorige Frage: "' + context.lastQuery + '"'
-      + (context.lastAnswer ? ('. Vorige Antwort: "' + String(context.lastAnswer).slice(0, 280) + '"') : '')
-      + '. Die neue Eingabe kann sich darauf beziehen (nur anderer Ort/Indikator, elliptisch). Löse solche Bezüge zu einer vollständigen Frage auf.\n\n' : '';
-  const u = await llmJSON(sys, ctx + 'Neue Eingabe: ' + query);
+  const u = await llmJSON(sys, memoryBlock(context) + 'Neue Eingabe: ' + query);
+  const kind = (u.kind === 'anschluss' || u.kind === 'neu') ? u.kind : 'neu';
   return {
+    kind,
     precise: !!u.precise,
     clarify: (u.clarify || '').toString(),
     best_guess: (u.best_guess || query).toString(),
