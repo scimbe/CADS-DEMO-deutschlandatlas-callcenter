@@ -74,7 +74,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ model: $env.LITELLM_DEFAULT_MODEL || 'local-devstral-small2', temperature: 0, max_tokens: 700, response_format: { type: 'json_object' }, messages: [   { role: 'system', content: $json.llmSystem },   { role: 'user', content: $json.llmUser } ]}) }}",
+        "jsonBody": "={{ JSON.stringify({ model: $('Load State Harness').item.json.harness.match_query.model, temperature: $('Load State Harness').item.json.harness.match_query.temperature, max_tokens: $('Load State Harness').item.json.harness.match_query.max_tokens, response_format: { type: 'json_object' }, messages: [ { role: 'system', content: $json.llmSystem }, { role: 'user', content: $json.llmUser } ]}) }}",
         "options": {
           "response": {
             "response": {
@@ -654,7 +654,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ model: $env.LITELLM_DEFAULT_MODEL || 'local-devstral-small2', temperature: 0.2, max_tokens: 300, messages: [   { role: 'system', content: $json.llmPhraseSystem },   { role: 'user', content: $json.llmPhraseUser } ]}) }}",
+        "jsonBody": "={{ JSON.stringify({ model: $('Load State Harness').item.json.harness.phrase.model, temperature: $('Load State Harness').item.json.harness.phrase.temperature, max_tokens: $('Load State Harness').item.json.harness.phrase.max_tokens, messages: [   { role: 'system', content: $json.llmPhraseSystem },   { role: 'user', content: $json.llmPhraseUser } ]}) }}",
         "options": {
           "response": {
             "response": {
@@ -702,6 +702,319 @@
         6500,
         220
       ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Central per-state HARNESS: tune model/temperature/max_tokens/voice/output_language per\n// dialog state in ONE place; downstream nodes reference $('Load State Harness').item.json.harness.<state>.\n// output_language is set for EVERY state (not just where the EN-in-DE-TTS bug once appeared).\nconst M = ($env.LITELLM_DEFAULT_MODEL || 'local-devstral-small2');\nconst HARNESS = {\n  understand:  { model: M, temperature: 0,   max_tokens: 300, tts_voice: null,      output_language: 'de' },\n  clarify:     { model: M, temperature: 0.2, max_tokens: 150, tts_voice: 'primary', output_language: 'de' },\n  match_query: { model: M, temperature: 0,   max_tokens: 700, tts_voice: null,      output_language: 'de' },\n  enrich:      { model: M, temperature: 0,   max_tokens: 200, tts_voice: null,      output_language: 'de' },\n  phrase:      { model: M, temperature: 0.2, max_tokens: 400, tts_voice: 'primary', output_language: 'de' },\n  followup:    { model: M, temperature: 0.2, max_tokens: 150, tts_voice: 'primary', output_language: 'de' },\n};\nconst inp = $input.first().json;\nconst dialog_state = inp.dialog_state || (inp.body && inp.body.dialog_state) || 'match_query';\nreturn [{ json: { ...inp, dialog_state, harness: HARNESS } }];"
+      },
+      "id": "0950796e-848a-4a71-9b1b-47fe42a73d75",
+      "name": "Load State Harness",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        130,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "id": "0b429536-1507-4f0d-8a6f-b0c335ed2ab3",
+                    "leftValue": "={{ $json.dialog_state }}",
+                    "rightValue": "understand",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ]
+              },
+              "renameOutput": true,
+              "outputKey": "understand"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "id": "714e80a2-f14b-42df-96f3-7cab09beb828",
+                    "leftValue": "={{ $json.dialog_state }}",
+                    "rightValue": "followup",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ]
+              },
+              "renameOutput": true,
+              "outputKey": "followup"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "id": "af3ff18b-9a2b-49d7-b1ee-219ca69123bf",
+                    "leftValue": "={{ $json.dialog_state }}",
+                    "rightValue": "enrich",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ]
+              },
+              "renameOutput": true,
+              "outputKey": "enrich"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra",
+          "renameFallbackOutput": "match_query"
+        }
+      },
+      "id": "47aaa637-0cf8-4f74-b493-81764e4217c6",
+      "name": "Route by Dialog State",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [
+        370,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const d=$input.first().json; const q=(d.query||(d.body&&d.body.query)||''); const ctx=d.context||(d.body&&d.body.context)||{}; const c=ctx.lastQuery?('Laufendes Gespraech. Vorige Frage: \"'+ctx.lastQuery+'\". Elliptische Bezuege aufloesen.\\n\\n'):''; return [{json:{...d, llmSystem:\"Du bist die Dialogfuehrung eines deutschen Sprach-Callcenters fuer Deutschlandatlas-Regionaldaten. Fuehre den Anrufer mit EINER gezielten Rueckfrage zu genau EINEM Indikator + EINEM Ort. Antworte NUR mit striktem JSON: {\\\\\\\"precise\\\\\\\":boolean,\\\\\\\"clarify\\\\\\\":string,\\\\\\\"best_guess\\\\\\\":string,\\\\\\\"options\\\\\\\":[string]}. best_guess immer gesetzt (vollstaendiger deutscher Fragesatz). Fehlt der Ort, frage nach dem Ort.\", llmUser: c+'Neue Eingabe: '+q}}];"
+      },
+      "id": "4149e9e5-b424-40fa-b1f2-875380fe303a",
+      "name": "Build Understand Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        630,
+        120
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.LITELLM_BASE_URL }}/chat/completions",
+        "authentication": "none",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.LITELLM_API_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: $('Load State Harness').item.json.harness.understand.model, temperature: $('Load State Harness').item.json.harness.understand.temperature, max_tokens: $('Load State Harness').item.json.harness.understand.max_tokens, response_format: { type: 'json_object' }, messages: [ { role: 'system', content: $json.llmSystem }, { role: 'user', content: $json.llmUser } ]}) }}",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          },
+          "timeout": 60000
+        }
+      },
+      "id": "bb13693f-f444-4ee1-ab36-a2a4acc56724",
+      "name": "LLM Understand",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        890,
+        120
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.parse($json.choices[0].message.content) }}",
+        "options": {}
+      },
+      "id": "c0ec19a6-8971-4e62-9d22-6a1a04774c77",
+      "name": "Respond Understand",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1150,
+        120
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const d=$input.first().json; const q=(d.query||(d.body&&d.body.query)||''); const a=(d.answer||(d.body&&d.body.answer)||''); return [{json:{...d, llmSystem:\"Du fuehrst ein LAUFENDES Gespraech eines deutschen Deutschlandatlas-Callcenters fort. Biete IMMER passende Anschlussfragen. Antworte NUR mit striktem JSON: {\\\\\\\"invite\\\\\\\":string,\\\\\\\"suggestions\\\\\\\":[string]}. invite = EINE vollstaendig ausformulierte gesprochene Anschlussfrage, NIE bei 'zum Beispiel' aufhoeren. suggestions = 2-3 vollstaendige deutsche Fragesaetze (je Indikator + Ort).\", llmUser:'Beantwortete Frage: '+q+'\\nGegebene Antwort: '+a}}];"
+      },
+      "id": "4d58ff66-517d-433a-8474-0dc181112198",
+      "name": "Build Followup Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        630,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.LITELLM_BASE_URL }}/chat/completions",
+        "authentication": "none",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.LITELLM_API_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: $('Load State Harness').item.json.harness.followup.model, temperature: $('Load State Harness').item.json.harness.followup.temperature, max_tokens: $('Load State Harness').item.json.harness.followup.max_tokens, response_format: { type: 'json_object' }, messages: [ { role: 'system', content: $json.llmSystem }, { role: 'user', content: $json.llmUser } ]}) }}",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          },
+          "timeout": 60000
+        }
+      },
+      "id": "165266fd-94b0-4120-bea4-3c274c2264cf",
+      "name": "LLM Followup",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        890,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.parse($json.choices[0].message.content) }}",
+        "options": {}
+      },
+      "id": "9a50b29e-5dc1-4d81-9517-9761b03f6540",
+      "name": "Respond Followup",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1150,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const d=$input.first().json; const q=(d.query||(d.place||(d.body&&d.body.query)||'')); const m=q.match(/\\b(?:in|fuer|von|zu|ueber|für)\\s+([A-ZAOU\\u00c4\\u00d6\\u00dc][\\wa-z\\u00e4\\u00f6\\u00fc\\u00df.-]+)/); return [{json:{...d, wikiTitle:(d.place||(m?m[1]:'')).replace(/[.?!,;:]+$/,'')}}];"
+      },
+      "id": "c7130e19-afdf-4c5a-86dc-b39a62321c9c",
+      "name": "Build Wiki Title",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        630,
+        520
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://de.wikipedia.org/api/rest_v1/page/summary/{{ encodeURIComponent($json.wikiTitle) }}",
+        "authentication": "none",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "accept",
+              "value": "application/json"
+            },
+            {
+              "name": "user-agent",
+              "value": "CADS-Demo-Callcenter/1.0 (https://bunsenbrenner.org)"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          },
+          "timeout": 8000
+        }
+      },
+      "id": "3c27e4bf-6e71-40d4-9406-a802f33576cd",
+      "name": "Wikipedia Fun Fact",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        890,
+        520
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const j=$input.first().json; if(!j||j.type==='disambiguation'||!j.extract){return [{json:{funfact:null}}];} const text=String(j.extract).split(/(?<=[.!?])\\s+/).slice(0,2).join(' ').trim(); return [{json:{funfact: text.length>=20 ? {text, title:j.title, url:(j.content_urls&&j.content_urls.desktop&&j.content_urls.desktop.page)||''} : null}}];"
+      },
+      "id": "b6e545c2-1260-4144-b88c-d2648a2d3f0f",
+      "name": "Extract Fun Fact",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1150,
+        520
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {}
+      },
+      "id": "5b437916-c8c9-4d94-9b2c-c130e8c36813",
+      "name": "Respond Enrich",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1410,
+        520
+      ]
     }
   ],
   "connections": {
@@ -709,7 +1022,7 @@
       "main": [
         [
           {
-            "node": "Fetch Catalog (GitHub)",
+            "node": "Load State Harness",
             "type": "main",
             "index": 0
           }
@@ -1042,6 +1355,126 @@
         [
           {
             "node": "Respond With Answer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load State Harness": {
+      "main": [
+        [
+          {
+            "node": "Route by Dialog State",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route by Dialog State": {
+      "main": [
+        [
+          {
+            "node": "Build Understand Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Followup Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Wiki Title",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fetch Catalog (GitHub)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Understand Prompt": {
+      "main": [
+        [
+          {
+            "node": "LLM Understand",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LLM Understand": {
+      "main": [
+        [
+          {
+            "node": "Respond Understand",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Followup Prompt": {
+      "main": [
+        [
+          {
+            "node": "LLM Followup",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LLM Followup": {
+      "main": [
+        [
+          {
+            "node": "Respond Followup",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Wiki Title": {
+      "main": [
+        [
+          {
+            "node": "Wikipedia Fun Fact",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wikipedia Fun Fact": {
+      "main": [
+        [
+          {
+            "node": "Extract Fun Fact",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Fun Fact": {
+      "main": [
+        [
+          {
+            "node": "Respond Enrich",
             "type": "main",
             "index": 0
           }
