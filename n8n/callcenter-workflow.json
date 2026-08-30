@@ -1,0 +1,1060 @@
+{
+  "name": "Deutschlandatlas Call-Center",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "deutschlandatlas-callcenter",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "c364b302-13af-4884-809e-8cb343922c7f",
+      "name": "Caller Query In",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://raw.githubusercontent.com/scimbe/CADS-DEMO-deutschlandatlas-callcenter/main/catalog.json",
+        "authentication": "none",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "d844da08-42e5-430c-8772-d6362d6e4ba5",
+      "name": "Fetch Catalog (GitHub)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        260,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Build a compact, LLM-friendly candidate list and the system/user prompt used\n// to semantically match the caller's query to a REAL catalog.json entry.\nconst catalog = $input.first().json; // parsed catalog.json (fetched live from GitHub)\nconst rows = Array.isArray(catalog.rows) ? catalog.rows : [];\n\nconst webhookItem = $('Caller Query In').item.json;\nconst callerQuery = (webhookItem.body && webhookItem.body.query)\n  || webhookItem.query\n  || '';\n\n// Only real \"indicator\" rows are offered as answer candidates -- boundary/\n// basemap rows (kind: \"boundary_or_basemap\") are not indicator data and are\n// never a valid \"table\" answer to a data question.\nconst candidates = rows\n  .filter((r) => r.kind === 'indicator')\n  .map((r) => ({\n    title: r.title,\n    field: r.field,\n    topic: r.topic_guess,\n    snippet: r.snippet,\n  }));\n\nconst systemPrompt = [\n  'You are the query-understanding stage of a German public-data call-center assistant.',\n  'You will be given a caller question and a list of REAL, LIVE table entries from the',\n  \"German government Deutschlandatlas API. Your ONLY job is to pick the entry whose\",\n  '\"snippet\" most plausibly answers the caller\\'s question (semantic match on meaning,',\n  'not keyword overlap), and to extract any German place name the caller mentioned.',\n  '',\n  'Rules:',\n  '- \"table\" MUST be copied EXACTLY (verbatim) from one of the given \"title\" values.',\n  '  Never invent, translate, abbreviate, or guess a table name not in the list.',\n  '- If nothing in the list plausibly answers the question (for example the caller',\n  '  asks about a topic this dataset does not cover at all, such as crime statistics',\n  '  or rent-burden-as-percent-of-income, which this dataset does not have), set',\n  '  \"matched\" to false and leave \"table\" null. Do not force a bad match.',\n  '- If there is no exact match but a nearby table in the list answers a related,',\n  '  reasonable reformulation of the question, pick that table, set \"matched\" true',\n  '  AND \"reformulated\" true, and explain the reformulation in \"reformulation_note\".',\n  '  The reformulation must still be a real table from the list -- never a fabricated one.',\n  '- \"place_name\" is the German place (city/municipality) the caller named, verbatim',\n  '  as they said it, or null if none was named.',\n  '- Respond with ONLY a JSON object, no prose, no markdown fence:',\n  '  {\"matched\": boolean, \"table\": string|null, \"reformulated\": boolean,',\n  '   \"reformulation_note\": string|null, \"place_name\": string|null,',\n  '   \"no_match_reason\": string|null}',\n].join('\\n');\n\nconst userPrompt = JSON.stringify({\n  caller_question: callerQuery,\n  candidate_tables: candidates,\n});\n\nreturn [{\n  json: {\n    callerQuery,\n    llmSystem: systemPrompt,\n    llmUser: userPrompt,\n  },\n}];"
+      },
+      "id": "9cf91c51-66d9-4607-861c-eb4c19044b45",
+      "name": "Build Catalog Match Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        520,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.LITELLM_BASE_URL }}/chat/completions",
+        "authentication": "none",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.LITELLM_API_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: $env.LITELLM_DEFAULT_MODEL || 'local-devstral-small2', temperature: 0, max_tokens: 700, response_format: { type: 'json_object' }, messages: [   { role: 'system', content: $json.llmSystem },   { role: 'user', content: $json.llmUser } ]}) }}",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          },
+          "timeout": 60000
+        }
+      },
+      "id": "65cc5cfa-722e-4e67-9d75-f9db3539841f",
+      "name": "LLM Match Catalog",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        780,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Deterministically validate the LLM's catalog-match output. NEVER trust the\n// model's proposed table name blindly -- it must exist verbatim in catalog.json.\nconst catalog = $('Fetch Catalog (GitHub)').first().json;\nconst rows = Array.isArray(catalog.rows) ? catalog.rows : [];\nconst promptCtx = $('Build Catalog Match Prompt').first().json;\nconst resp = $input.first().json;\n\nfunction parseLoose(text) {\n  if (typeof text !== 'string') return null;\n  try { return JSON.parse(text); } catch (e) { /* fall through */ }\n  const m = /^```(?:json)?\\s*([\\s\\S]*?)\\s*```$/.exec(text.trim());\n  if (m) { try { return JSON.parse(m[1]); } catch (e) { /* fall through */ } }\n  return null;\n}\n\nconst content = resp && resp.choices && resp.choices[0] && resp.choices[0].message\n  ? resp.choices[0].message.content\n  : null;\nconst parsed = parseLoose(content);\n\nif (!parsed) {\n  return [{ json: {\n    matched: false,\n    no_match_reason: 'The catalog-matching LLM call did not return valid JSON; failing closed rather than guessing a table.',\n    callerQuery: promptCtx.callerQuery,\n  } }];\n}\n\nconst row = parsed.matched\n  ? rows.find((r) => r.kind === 'indicator' && r.title === parsed.table)\n  : null;\n\nif (parsed.matched && !row) {\n  return [{ json: {\n    matched: false,\n    no_match_reason: `The model proposed table \"${parsed.table}\", which does not exist verbatim in catalog.json -- failing closed rather than querying a hallucinated table.`,\n    callerQuery: promptCtx.callerQuery,\n  } }];\n}\n\nreturn [{ json: {\n  matched: !!parsed.matched,\n  reformulated: !!parsed.reformulated,\n  reformulation_note: parsed.reformulation_note || null,\n  place_name: parsed.place_name || null,\n  no_match_reason: parsed.no_match_reason || null,\n  callerQuery: promptCtx.callerQuery,\n  catalogRow: row, // real row object: title, snippet, url, field, kind, topic_guess, ...\n} }];"
+      },
+      "id": "a9545dde-f12e-4f73-bfb1-ae88075dd3eb",
+      "name": "Validate Catalog Match",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1040,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.matched }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "3892cb0a-53d0-4df9-ac2e-8ef9672f1feb",
+      "name": "Catalog Match Found?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1300,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const d = $input.first().json;\nconst text = d.no_match_reason\n  ? `Entschuldigung, dazu finde ich im Deutschlandatlas keine passenden Live-Daten. Grund: ${d.no_match_reason} Bitte fragen Sie zu einem anderen Thema wie Beschäftigung, Wohnen, Bevölkerung, Bildung, Umwelt, Gesundheit, Finanzen oder Infrastruktur.`\n  : 'Entschuldigung, dazu finde ich im Deutschlandatlas keine passenden Live-Daten. Bitte formulieren Sie Ihre Frage anders.';\n\nreturn [{ json: {\n  text,\n  meta: {\n    matched: false,\n    no_match_reason: d.no_match_reason || null,\n    caller_query: d.callerQuery || null,\n    grounded: true, // no fact was spoken -- a fixed, non-fabricated refusal\n  },\n} }];"
+      },
+      "id": "9ac64245-0401-4b87-a964-2f25e640d51a",
+      "name": "No Catalog Match Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1560,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {}
+      },
+      "id": "82dff5cf-012d-49cb-a276-c0208c2fa540",
+      "name": "Respond No Match",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1820,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $json.catalogRow.url }}",
+        "authentication": "none",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "f",
+              "value": "json"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "5cdf7edf-6c2b-4969-b3d8-15f476728425",
+      "name": "Get Indicator MapServer Metadata",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1560,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Per this project's own live-verified finding (see catalog.json's\n// \"query_template_caveat\"): the README's documented query URL hardcodes\n// layer id 0, but that is frequently wrong -- many tables' real queryable\n// Feature Layer lives at id 3-6 instead, and id 0 is often an unqueryable\n// cached Raster Layer. Always discover the real id from MapServer?f=json,\n// never assume it.\nconst meta = $input.first().json; // MapServer?f=json response\nconst match = $('Validate Catalog Match').first().json;\n\nconst layers = Array.isArray(meta.layers) ? meta.layers : [];\nconst capabilities = typeof meta.capabilities === 'string' ? meta.capabilities : '';\nconst featureLayer = layers.find((l) => l.type === 'Feature Layer');\n\nconst layerId = featureLayer ? featureLayer.id : 0;\nconst queryable = capabilities.split(',').map((s) => s.trim()).includes('Query');\n\nreturn [{ json: {\n  ...match,\n  layerId,\n  readmeLayer0Mismatch: layerId !== 0,\n  queryable,\n  serviceCapabilities: capabilities,\n  serviceHadNoFeatureLayer: !featureLayer,\n} }];"
+      },
+      "id": "fe61f290-8a5a-4599-81f7-040c1d15a77e",
+      "name": "Pick Indicator Layer",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1820,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.queryable }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "a4a8ee25-5c58-4f71-a1fd-1e6f26650f53",
+      "name": "Indicator Service Queryable?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2080,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const d = $input.first().json;\nreturn [{ json: {\n  ...d,\n  dataError: true,\n  dataErrorMessage: d.serviceHadNoFeatureLayer\n    ? `Service capabilities are \"${d.serviceCapabilities}\" and no Feature Layer was found in MapServer?f=json -- this table is a cached map/basemap layer with no queryable attribute data.`\n    : `Service capabilities are \"${d.serviceCapabilities}\" (no \"Query\" capability) -- this table's data cannot be fetched via the query endpoint at all.`,\n  featuresOut: [],\n  fields: [],\n  whereClauseUsed: null,\n} }];"
+      },
+      "id": "8bfab238-a3c2-463a-b373-e96feaa41c91",
+      "name": "Mark Service Not Queryable",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2340,
+        40
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $json.catalogRow.url }}/{{ $json.layerId }}/query",
+        "authentication": "none",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "f",
+              "value": "json"
+            },
+            {
+              "name": "where",
+              "value": "1=1"
+            },
+            {
+              "name": "outFields",
+              "value": "*"
+            },
+            {
+              "name": "returnGeometry",
+              "value": "false"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "faba4bd1-dfa7-4189-839f-e624b889bf88",
+      "name": "Discover Indicator Fields",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2340,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Deliberately NEVER send resultRecordCount: some services (e.g.\n// pendel_a_HA2023, VG250_LAN1217_grenzen) reject it outright\n// (supportsPagination: false -> \"Pagination is not supported.\") -- a real,\n// live-verified API quirk (catalog.json's \"no_pagination_fallback\"). Omitting\n// it entirely and capping the *response* client-side (below) avoids the\n// whole class of error rather than needing a detect-and-retry round trip.\nconst body = $input.first().json;\nconst ctx = $('Pick Indicator Layer').first().json;\n\nconst errMsg = body && body.error ? (body.error.message || JSON.stringify(body.error)) : null;\n\nif (errMsg) {\n  return [{ json: {\n    ...ctx,\n    dataError: true,\n    dataErrorMessage: `MapServer query error while discovering schema: ${errMsg}`,\n    featuresOut: [],\n  } }];\n}\n\nconst fields = Array.isArray(body.fields) ? body.fields.map((f) => f.name) : [];\nconst sample = (Array.isArray(body.features) ? body.features : [])\n  .slice(0, 5)\n  .map((f) => f.attributes);\n\nreturn [{ json: {\n  ...ctx,\n  discoveredFields: fields,\n  discoveredSample: sample,\n} }];"
+      },
+      "id": "1d8f622c-81e3-4bd9-9ea9-927918f87331",
+      "name": "Handle Field Discovery Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2600,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Confirm the real field names for THIS table live -- geographic granularity\n// and schema vary per table, so never assume a fixed schema across the 199\n// catalog rows (per this project's own architecture doc).\nconst d = $input.first().json;\nconst fields = Array.isArray(d.discoveredFields) ? d.discoveredFields : [];\nconst REGION_NAME_FIELDS = ['GEN', 'name', 'NAME'];\nconst directNameField = REGION_NAME_FIELDS.find((f) => fields.includes(f)) || null;\n\nreturn [{ json: {\n  ...d,\n  fields,\n  hasDirectNameField: !!directNameField,\n  directNameField,\n} }];"
+      },
+      "id": "fad4879b-c016-4583-8b68-63b03a02c02f",
+      "name": "Finalize Schema",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3120,
+        260
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.dataError }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "notEquals"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "4b425002-ff2a-4d32-8c49-3218a834f3aa",
+      "name": "Schema Discovery OK?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        3380,
+        260
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.hasDirectNameField && !!$json.place_name }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "7ae59992-5a60-4178-8058-37525649e31e",
+      "name": "Has Direct Name Field And Place Given?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        3640,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const d = $input.first().json;\n// Esri's where-clause is SQL-like; double any single quote in the caller-\n// supplied place name (standard SQL-string escaping) before interpolating.\nconst place = String(d.place_name).replace(/'/g, \"''\");\nconst field = d.directNameField;\nconst whereClause = `UPPER(${field}) LIKE UPPER('%${place}%')`;\n\nreturn [{ json: {\n  ...d,\n  whereClauseUsed: whereClause,\n  placeFilterApplied: true,\n  placeFilterUnavailableReason: null,\n  boundaryResolved: null,\n} }];"
+      },
+      "id": "0750b29d-6a69-4d77-8d12-70b6bd8a6aed",
+      "name": "Build Where Clause Direct Filter",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3900,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ !!$json.place_name && !$json.hasDirectNameField }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "e37284c0-f300-4286-bbb3-3ea01a6f2a99",
+      "name": "Place Given But No Direct Field?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        3900,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://www.karto365.de/hosting/rest/services/VG250_Verbandsgemeinden1219_Punkt/MapServer",
+        "authentication": "none",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "f",
+              "value": "json"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "8e7e8b6e-3809-46d2-a256-54b399a6a1a2",
+      "name": "Boundary Layer Metadata",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        4160,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Region resolution uses the Deutschlandatlas' OWN administrative boundary\n// layer (VG250_Verbandsgemeinden1219_Punkt) -- never a third-party geocoder,\n// per this project's already-decided architecture (see README). Still\n// discover the real layer id live rather than hardcoding it, consistent\n// with the same rule applied to the 199 indicator tables.\nconst meta = $input.first().json; // boundary MapServer?f=json response\nconst ctx = $('Finalize Schema').first().json; // carried caller/table context\n\nconst layers = Array.isArray(meta.layers) ? meta.layers : [];\nconst capabilities = typeof meta.capabilities === 'string' ? meta.capabilities : '';\nconst featureLayer = layers.find((l) => l.type === 'Feature Layer');\nconst layerId = featureLayer ? featureLayer.id : 0;\nconst queryable = capabilities.split(',').map((s) => s.trim()).includes('Query');\n\nconst place = String(ctx.place_name || '').replace(/'/g, \"''\");\n\nreturn [{ json: {\n  ...ctx,\n  boundaryUrl: 'https://www.karto365.de/hosting/rest/services/VG250_Verbandsgemeinden1219_Punkt/MapServer',\n  boundaryLayerId: layerId,\n  boundaryQueryable: queryable,\n  boundaryWhereClause: `UPPER(GEN) LIKE UPPER('%${place}%')`,\n} }];"
+      },
+      "id": "a8dcf58a-d99a-4ce6-8a0f-04517009cec0",
+      "name": "Pick Boundary Layer",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4420,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $json.boundaryUrl }}/{{ $json.boundaryLayerId }}/query",
+        "authentication": "none",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "f",
+              "value": "json"
+            },
+            {
+              "name": "where",
+              "value": "={{ $json.boundaryWhereClause }}"
+            },
+            {
+              "name": "outFields",
+              "value": "*"
+            },
+            {
+              "name": "returnGeometry",
+              "value": "false"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "00926ea8-50d3-4b2d-abfb-5eee02231b2a",
+      "name": "Query Boundary For Place",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        4680,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const body = $input.first().json; // boundary query response\nconst ctx = $('Pick Boundary Layer').first().json;\n\nconst errMsg = body && body.error ? (body.error.message || JSON.stringify(body.error)) : null;\nconst features = !errMsg && Array.isArray(body.features) ? body.features : [];\n\nlet boundaryResolved = null;\nif (features.length > 0) {\n  const attrs = features[0].attributes || {};\n  boundaryResolved = {\n    matchedName: attrs.GEN || null,\n    type: attrs.BEZ || null,\n    ars: attrs.ARS || null,\n    level: 'Verbandsgemeinde',\n  };\n}\n\n// The resolved boundary code is NOT used as a join key into the indicator\n// table: the only queryable boundary layer here is Verbandsgemeinde-level\n// (9-digit ARS) while most indicator tables are Kreis-level (Gebiets-\n// kennziffer) -- a different granularity. Guessing a numeric-prefix join\n// across that mismatch could silently return the wrong region's number,\n// which this project's grounding requirement forbids. The boundary match is\n// used only to confirm/canonicalize the place name for the caller.\nreturn [{ json: {\n  ...ctx,\n  boundaryResolved,\n  boundaryMatchFailed: !boundaryResolved,\n  whereClauseUsed: '1=1',\n  placeFilterApplied: false,\n  placeFilterUnavailableReason:\n    `Table \"${ctx.catalogRow.title}\" has no place-name field of its own ` +\n    `(fields present: ${ctx.fields.join(', ')}); ` +\n    (boundaryResolved\n      ? `the caller's place could be confirmed as \"${boundaryResolved.matchedName}\" against the boundary layer, but this table cannot be filtered to it -- returning its available sample data instead.`\n      : `and the named place could not be confirmed against the boundary layer either -- returning the table's available sample data instead.`),\n} }];"
+      },
+      "id": "0f311a83-7986-43e3-b64c-757b11e275de",
+      "name": "Check Boundary Match",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4940,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// No place name was given (or the table has one but the caller didn't name\n// a place) -- query without a place filter and let the phrasing step be\n// honest about scope.\nconst d = $input.first().json;\nreturn [{ json: {\n  ...d,\n  whereClauseUsed: '1=1',\n  placeFilterApplied: false,\n  placeFilterUnavailableReason: null,\n  boundaryResolved: null,\n} }];"
+      },
+      "id": "5412fc46-d067-40af-812e-e77030198d5a",
+      "name": "Build Where Clause No Filter",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4160,
+        460
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $json.catalogRow.url }}/{{ $json.layerId }}/query",
+        "authentication": "none",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "f",
+              "value": "json"
+            },
+            {
+              "name": "where",
+              "value": "={{ $json.whereClauseUsed }}"
+            },
+            {
+              "name": "outFields",
+              "value": "*"
+            },
+            {
+              "name": "returnGeometry",
+              "value": "false"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "9f63220a-f4e2-4314-b6fe-12fba374e8d1",
+      "name": "Query Indicator Data Final",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        5200,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Exactly one of the three where-clause-builder branches ran upstream of\n// this node -- recover its carried context by name (n8n keeps every node's\n// output addressable by name for the whole execution, even branches that\n// did not run simply throw when referenced, hence the try/catch probe).\nconst body = $input.first().json; // final indicator query response\n\nfunction firstDefined(...fns) {\n  for (const fn of fns) {\n    try {\n      const v = fn();\n      if (v) return v;\n    } catch (e) { /* that branch did not execute in this run */ }\n  }\n  return null;\n}\n\nconst ctx = firstDefined(\n  () => $('Build Where Clause Direct Filter').first().json,\n  () => $('Check Boundary Match').first().json,\n  () => $('Build Where Clause No Filter').first().json,\n) || $('Finalize Schema').first().json;\n\nconst errMsg = body && body.error ? (body.error.message || JSON.stringify(body.error)) : null;\nconst features = !errMsg && Array.isArray(body.features) ? body.features : [];\n// Cap what reaches the phrasing LLM -- some tables return hundreds/thousands\n// of rows when queried unfiltered (e.g. pendel_a_HA2023's ~2000-row OD\n// matrix); a handful of real sample rows is enough to answer or to honestly\n// describe what's available, and keeps the prompt bounded.\nconst featuresOut = features.slice(0, 10).map((f) => f.attributes);\n\nreturn [{ json: {\n  ...ctx,\n  dataError: !!errMsg,\n  dataErrorMessage: errMsg,\n  noRowsFound: !errMsg && featuresOut.length === 0,\n  featuresOut,\n} }];"
+      },
+      "id": "e3cac4b5-f064-48b9-beb7-20777aeede77",
+      "name": "Validate Final Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        5460,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// The single grounding gate: the phrasing LLM is instructed, in-band, to use\n// ONLY facts literally present in live_api_data -- nothing recalled,\n// inferred, calculated, or guessed. This node builds that prompt for both\n// the \"real data available\" and the \"no usable data\" case; it never\n// synthesizes a data-shaped answer itself.\nconst d = $input.first().json;\nconst featuresOut = Array.isArray(d.featuresOut) ? d.featuresOut : [];\nconst hasRealData = !d.dataError && !d.noRowsFound && featuresOut.length > 0;\n\nconst table = d.catalogRow || {};\nconst callerQuery = d.callerQuery || '';\n\nlet systemPrompt;\nlet userPayload;\n\nif (hasRealData) {\n  const lines = [\n    'You are a German-speaking voice call-center assistant for public regional',\n    'statistics (Deutschlandatlas). Below is REAL data returned just now, live,',\n    `from the official German government Feature Service for table \"${table.title}\"`,\n    `(\"${table.snippet}\"), value field \"${table.field}\".`,\n    '',\n    'STRICT RULES (never break these):',\n    '- Use ONLY facts, numbers, and place names literally present in the JSON below.',\n    '- NEVER add, infer, calculate, round, compare, or guess any fact not present',\n    '  in this JSON -- not even something that \"sounds right\".',\n    '- If the JSON does not fully answer the caller, say plainly what is and is not',\n    '  available; do not fill the gap with invented information.',\n  ];\n  if (d.placeFilterApplied === false && d.placeFilterUnavailableReason) {\n    lines.push(`- ${d.placeFilterUnavailableReason}`);\n  }\n  if (d.reformulated) {\n    lines.push(`- The caller's original question was reformulated: ${d.reformulation_note || ''}. Mention briefly that you're answering a related question.`);\n  }\n  lines.push('- Answer in 2-4 short, natural spoken sentences suitable for text-to-speech,');\n  lines.push('  in the same language as the caller question.');\n  systemPrompt = lines.join('\\n');\n\n  userPayload = JSON.stringify({\n    caller_question: callerQuery,\n    live_api_data: featuresOut,\n  });\n} else {\n  const reason = d.dataErrorMessage || 'no matching rows were returned by the live query';\n  systemPrompt = [\n    'You are a German-speaking voice call-center assistant for public regional',\n    'statistics (Deutschlandatlas). A live query to the real government data API',\n    'just now did NOT return usable data for this caller question.',\n    '',\n    'STRICT RULES:',\n    '- Apologize briefly and state plainly that no data is available right now --',\n    '  do NOT invent a number or fact to fill the gap.',\n    '- You may suggest the caller ask about a different topic (employment, housing,',\n    '  demographics, education, infrastructure, environment, health, finance) since',\n    '  those are the categories this dataset actually covers.',\n    '- 1-3 short spoken sentences, same language as the caller question.',\n  ].join('\\n');\n\n  userPayload = JSON.stringify({\n    caller_question: callerQuery,\n    failure_reason: reason,\n  });\n}\n\nreturn [{ json: {\n  ...d,\n  llmPhraseSystem: systemPrompt,\n  llmPhraseUser: userPayload,\n  hasRealData,\n} }];"
+      },
+      "id": "a3cd9076-b564-47f7-98c1-c9db22bf5475",
+      "name": "Build Phrasing Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        5720,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.LITELLM_BASE_URL }}/chat/completions",
+        "authentication": "none",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.LITELLM_API_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: $env.LITELLM_DEFAULT_MODEL || 'local-devstral-small2', temperature: 0.2, max_tokens: 300, messages: [   { role: 'system', content: $json.llmPhraseSystem },   { role: 'user', content: $json.llmPhraseUser } ]}) }}",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          },
+          "timeout": 60000
+        }
+      },
+      "id": "d6202001-9774-4319-b4dd-c09c163b2413",
+      "name": "LLM Phrase Answer",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        5980,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const resp = $input.first().json;\nconst ctx = $('Build Phrasing Prompt').first().json;\n\nconst content = resp && resp.choices && resp.choices[0] && resp.choices[0].message\n  ? String(resp.choices[0].message.content || '').trim()\n  : null;\n\nconst answerText = content || (ctx.hasRealData\n  ? 'Entschuldigung, ich konnte die Antwort gerade nicht formulieren, obwohl Live-Daten vorlagen.'\n  : (ctx.dataErrorMessage || 'Entschuldigung, dazu liegen mir gerade keine Daten vor.'));\n\nreturn [{ json: {\n  text: answerText,\n  meta: {\n    matched: true,\n    reformulated: !!ctx.reformulated,\n    reformulation_note: ctx.reformulation_note || null,\n    table: ctx.catalogRow ? ctx.catalogRow.title : null,\n    field: ctx.catalogRow ? ctx.catalogRow.field : null,\n    source_url: ctx.catalogRow ? ctx.catalogRow.url : null,\n    layer_id: ctx.layerId != null ? ctx.layerId : null,\n    where_clause: ctx.whereClauseUsed || null,\n    place_name_requested: ctx.place_name || null,\n    place_resolved: ctx.boundaryResolved || null,\n    has_real_data: ctx.hasRealData,\n    data_error: ctx.dataErrorMessage || null,\n    live_rows_used: Array.isArray(ctx.featuresOut) ? ctx.featuresOut.length : 0,\n  },\n} }];"
+      },
+      "id": "ce988bac-9156-4ead-8e92-af1da13ccd27",
+      "name": "Extract Final Answer",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        6240,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {}
+      },
+      "id": "18138167-7434-4d78-ab52-e4f3fe2b19db",
+      "name": "Respond With Answer",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        6500,
+        220
+      ]
+    }
+  ],
+  "connections": {
+    "Caller Query In": {
+      "main": [
+        [
+          {
+            "node": "Fetch Catalog (GitHub)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Catalog (GitHub)": {
+      "main": [
+        [
+          {
+            "node": "Build Catalog Match Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Catalog Match Prompt": {
+      "main": [
+        [
+          {
+            "node": "LLM Match Catalog",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LLM Match Catalog": {
+      "main": [
+        [
+          {
+            "node": "Validate Catalog Match",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Catalog Match": {
+      "main": [
+        [
+          {
+            "node": "Catalog Match Found?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Catalog Match Found?": {
+      "main": [
+        [
+          {
+            "node": "Get Indicator MapServer Metadata",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No Catalog Match Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "No Catalog Match Response": {
+      "main": [
+        [
+          {
+            "node": "Respond No Match",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Indicator MapServer Metadata": {
+      "main": [
+        [
+          {
+            "node": "Pick Indicator Layer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pick Indicator Layer": {
+      "main": [
+        [
+          {
+            "node": "Indicator Service Queryable?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Indicator Service Queryable?": {
+      "main": [
+        [
+          {
+            "node": "Discover Indicator Fields",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mark Service Not Queryable",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark Service Not Queryable": {
+      "main": [
+        [
+          {
+            "node": "Build Phrasing Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Discover Indicator Fields": {
+      "main": [
+        [
+          {
+            "node": "Handle Field Discovery Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Handle Field Discovery Result": {
+      "main": [
+        [
+          {
+            "node": "Finalize Schema",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Finalize Schema": {
+      "main": [
+        [
+          {
+            "node": "Schema Discovery OK?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Schema Discovery OK?": {
+      "main": [
+        [
+          {
+            "node": "Has Direct Name Field And Place Given?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Phrasing Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Direct Name Field And Place Given?": {
+      "main": [
+        [
+          {
+            "node": "Build Where Clause Direct Filter",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Place Given But No Direct Field?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Place Given But No Direct Field?": {
+      "main": [
+        [
+          {
+            "node": "Boundary Layer Metadata",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Where Clause No Filter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Boundary Layer Metadata": {
+      "main": [
+        [
+          {
+            "node": "Pick Boundary Layer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pick Boundary Layer": {
+      "main": [
+        [
+          {
+            "node": "Query Boundary For Place",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Query Boundary For Place": {
+      "main": [
+        [
+          {
+            "node": "Check Boundary Match",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Where Clause Direct Filter": {
+      "main": [
+        [
+          {
+            "node": "Query Indicator Data Final",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Boundary Match": {
+      "main": [
+        [
+          {
+            "node": "Query Indicator Data Final",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Where Clause No Filter": {
+      "main": [
+        [
+          {
+            "node": "Query Indicator Data Final",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Query Indicator Data Final": {
+      "main": [
+        [
+          {
+            "node": "Validate Final Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Final Data": {
+      "main": [
+        [
+          {
+            "node": "Build Phrasing Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Phrasing Prompt": {
+      "main": [
+        [
+          {
+            "node": "LLM Phrase Answer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LLM Phrase Answer": {
+      "main": [
+        [
+          {
+            "node": "Extract Final Answer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Final Answer": {
+      "main": [
+        [
+          {
+            "node": "Respond With Answer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false
+  }
+}

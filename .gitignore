@@ -1,0 +1,9 @@
+.venv/
+vendor/
+voices/*.onnx
+voices/*.onnx.json
+__pycache__/
+*.pyc
+tests/_tmp_*.wav
+*.wav
+.env
