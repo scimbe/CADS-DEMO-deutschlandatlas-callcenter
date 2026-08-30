@@ -202,7 +202,7 @@
     setTimeout(()=>{if(player.paused&&player.currentTime===0&&!userPaused)start();},500);  // fallback if canplaythrough is slow
   }
 
-  let lastQuery=null,lastAnswer=null;   // conversation context for follow-ups
+  let lastQuery=null,lastAnswer=null,history=[];   // conversation memory (multi-turn) for follow-up resolution
   const ffEl=document.getElementById('funfact');
   function reset(){src.style.display='none';src.classList.remove('refuse');replay.style.display='none';ffEl.style.display='none';hideCtl();}
   function playClip(url){try{stopFiller();fillerEl.onended=null;showCtl();
@@ -246,9 +246,9 @@
     playFiller(); setState('listen'); aEl.className='a working'; aEl.textContent='Ich verstehe Ihre Frage …';
     setTimeout(()=>setState('think'),500);
     try{
-      const u=await (await fetch('/understand',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({query,context:{lastQuery,lastAnswer}})})).json();
+      const u=await (await fetch('/understand',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({query,context:{history,lastQuery,lastAnswer}})})).json();
       go.disabled=false; q.disabled=false;
-      if(u.precise){ deliver(u.best_guess); return; }
+      if(u.precise){ deliver(u.best_guess, u.kind==='anschluss'); return; }
       stopFiller(); setState('idle');
       aEl.className='a'; aEl.textContent=u.clarify||'Können Sie Ihre Frage etwas genauer stellen?';
       if(u.clarifyAudioUrl) playClip(u.clarifyAudioUrl);
@@ -281,6 +281,8 @@
           queueSpeak(d.funfact.audioUrl);}   // Thorsten speaks the fun fact, right after the answer
         if(!d.audioUrl){setTimeout(()=>setState('done'),800);}
         lastQuery=query; lastAnswer=ans;
+        history.push({q:query, place:(d.meta&&(d.meta.place_resolved||d.meta.place_name_requested))||null, answer:ans});
+        if(history.length>6) history.shift();   // keep a short rolling memory
         go.disabled=false; q.disabled=false;
         doFollowup(query, ans);
       });
