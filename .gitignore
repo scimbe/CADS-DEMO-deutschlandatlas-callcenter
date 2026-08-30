@@ -9,3 +9,4 @@ tests/_tmp_*.wav
 .env
 gui/.run.env
 gui/.run.log
+deploy/vendor/ct-agent
