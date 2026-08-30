@@ -87,6 +87,7 @@
     <div class="src" id="src"><span class="tick">✓ geerdet</span><span id="srcTxt"></span></div>
   </div>
   <audio id="player"></audio>
+  <audio id="filler"></audio>
 
   <footer>
     <span>Antworten aus der Live-Deutschlandatlas-API · nichts erfunden</span>
@@ -134,11 +135,12 @@
   const exWrap=document.getElementById('examples');
   EXAMPLES.forEach(x=>{const b=document.createElement('button');b.className='ex';b.textContent=x;b.onclick=()=>{q.value=x;ask();};exWrap.appendChild(b);});
 
-  // instant spoken filler via the browser's own voice (bridges the compute wait)
-  let deVoice=null;
-  function pickVoice(){try{const vs=speechSynthesis.getVoices();deVoice=vs.find(v=>/de(-|_)/i.test(v.lang))||vs.find(v=>/deutsch|german/i.test(v.name))||null;}catch(e){}}
-  if(window.speechSynthesis){pickVoice();speechSynthesis.onvoiceschanged=pickVoice;}
-  function sayFiller(text){try{if(!window.speechSynthesis)return;const u=new SpeechSynthesisUtterance(text);u.lang='de-DE';if(deVoice)u.voice=deVoice;u.rate=1.02;speechSynthesis.cancel();speechSynthesis.speak(u);}catch(e){}}
+  // instant spoken filler in THE Thorsten voice (pre-rendered, varied for naturalness) — bridges the compute wait
+  const fillerEl=document.getElementById('filler');
+  const FILLERS=[1,2,3,4,5,6].map(n=>'/fillers/filler'+n+'.wav');
+  let lastFiller=-1;
+  function playFiller(){try{let n;do{n=Math.floor(Math.random()*FILLERS.length);}while(FILLERS.length>1&&n===lastFiller);lastFiller=n;fillerEl.src=FILLERS[n];fillerEl.play().catch(()=>{});}catch(e){}}
+  function stopFiller(){try{fillerEl.pause();fillerEl.currentTime=0;}catch(e){}}
 
   const STATUS=['Ich habe Ihre Frage verstanden …','Ich suche die passende Deutschlandatlas-Tabelle …','Ich frage die Live-Daten bei der amtlichen Quelle ab …','Ich prüfe die Werte und formuliere Ihre Antwort …'];
   let statusTimer=null,tickTimer=null,t0=0;
@@ -152,6 +154,7 @@
     (function tick(){if(i<=text.length){el.textContent=text.slice(0,i);el.appendChild(cur);i++;setTimeout(tick,Math.max(9,1300/Math.max(1,text.length)));}else{el.textContent=text;done&&done();}})();}
 
   function playAnswer(url){
+    stopFiller();
     if(!url){speaking=false;setState('done');return;}
     player.src=url;replay.style.display='none';
     player.onplay=()=>{speaking=true;setState('speak');};
@@ -163,10 +166,9 @@
   async function ask(){
     const query=q.value.trim(); if(!query) return;
     go.disabled=true; q.disabled=true; src.style.display='none'; src.classList.remove('refuse'); replay.style.display='none';
-    try{speechSynthesis && speechSynthesis.cancel();}catch(e){}
+    stopFiller();
     qEcho.innerHTML='<span>Ihre Frage:</span> <b></b>'; qEcho.querySelector('b').textContent=query;
-    const place=(query.match(/\b(?:in|für|von)\s+([A-ZÄÖÜ][\wäöüß-]+)/)||[])[1];
-    sayFiller('Einen Moment bitte. Ich frage die aktuellen Deutschlandatlas-Daten'+(place?(' für '+place):'')+' ab.');
+    playFiller();
     setState('listen'); startWait();
     setTimeout(()=>setState('think'),700); setTimeout(()=>setState('query'),1800);
     try{
@@ -190,11 +192,21 @@
   go.onclick=ask; q.addEventListener('keydown',e=>{if(e.key==='Enter')ask();});
 
   const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
-  if(SR){const rec=new SR();rec.lang='de-DE';rec.interimResults=false;
-    mic.onclick=()=>{try{rec.start();mic.classList.add('on');setState('listen');}catch(e){}};
-    rec.onresult=e=>{q.value=e.results[0][0].transcript;mic.classList.remove('on');ask();};
-    rec.onend=()=>mic.classList.remove('on'); rec.onerror=()=>{mic.classList.remove('on');setState('idle');};
-  } else { mic.disabled=true; mic.title='Spracherkennung im Browser nicht verfügbar'; }
+  if(SR){let rec=null,listening=false;
+    const ERR={'not-allowed':'Bitte erlauben Sie den Mikrofon-Zugriff.','service-not-allowed':'Mikrofon-Zugriff ist blockiert.','no-speech':'Ich habe nichts gehört — bitte erneut auf 🎙️ tippen und sprechen.','audio-capture':'Kein Mikrofon gefunden.','network':'Die Spracherkennung braucht eine Internetverbindung.','aborted':'Spracheingabe abgebrochen — bitte erneut versuchen.'};
+    mic.onclick=()=>{
+      if(listening){try{rec&&rec.stop();}catch(e){} return;}
+      try{
+        stopFiller(); rec=new SR(); rec.lang='de-DE'; rec.interimResults=false; rec.maxAlternatives=1; rec.continuous=false;
+        rec.onstart=()=>{listening=true;mic.classList.add('on');setState('listen');};
+        rec.onresult=e=>{q.value=e.results[0][0].transcript;ask();};
+        rec.onerror=e=>{listening=false;mic.classList.remove('on');setState('idle');
+          aEl.className='a';aEl.textContent='Spracheingabe: '+(ERR[e.error]||e.error)+' — Sie können die Frage auch tippen.';};
+        rec.onend=()=>{listening=false;mic.classList.remove('on');};
+        rec.start();
+      }catch(err){listening=false;mic.classList.remove('on');aEl.className='a';aEl.textContent='Spracheingabe nicht verfügbar — bitte tippen. ('+err.message+')';}
+    };
+  } else { mic.disabled=true; mic.title='Spracherkennung im Browser nicht verfügbar (bitte Chrome verwenden)'; }
 })();
 </script>
 </body>
