@@ -88,9 +88,25 @@ const server = createServer(async (req, res) => {
       const meta = r.final?.meta || null;
       let audioUrl = null;
       if (answer) { try { audioUrl = await ttsSpeak(answer, 'primary'); } catch {} }
+      const proxied = audioUrl ? ('/audio?u=' + encodeURIComponent(audioUrl)) : null;
       res.writeHead(r.ok ? 200 : 502, { 'content-type': 'application/json; charset=utf-8' });
-      res.end(JSON.stringify({ query, ok: r.ok, answer, meta, audioUrl, error: r.ok ? null : (r.err || 'pipeline failed') }));
+      res.end(JSON.stringify({ query, ok: r.ok, answer, meta, audioUrl: proxied, error: r.ok ? null : (r.err || 'pipeline failed') }));
     });
+    return;
+  }
+  // Same-origin proxy for the TTS audio (a cross-origin <audio> routed through Web Audio is
+  // tainted -> silent; served here same-origin it just plays). Only proxies bunsenbrenner.org.
+  if (req.method === 'GET' && req.url.startsWith('/audio?')) {
+    try {
+      const u = new URL(req.url, 'http://x').searchParams.get('u') || '';
+      const parsed = new URL(u);
+      if (parsed.protocol !== 'https:' || !parsed.hostname.endsWith('bunsenbrenner.org')) { res.writeHead(400); res.end('bad url'); return; }
+      const up = await fetch(u);
+      if (!up.ok) { res.writeHead(502); res.end('upstream ' + up.status); return; }
+      const buf = Buffer.from(await up.arrayBuffer());
+      res.writeHead(200, { 'content-type': up.headers.get('content-type') || 'audio/wav', 'cache-control': 'no-store', 'access-control-allow-origin': '*' });
+      res.end(buf);
+    } catch { res.writeHead(500); res.end('proxy err'); }
     return;
   }
   res.writeHead(404); res.end('not found');

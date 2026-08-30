@@ -26,6 +26,8 @@
   .chip{position:absolute;top:14px;left:14px;z-index:3;display:flex;align-items:center;gap:.55em;font-family:"IBM Plex Mono",monospace;font-size:.72rem;
     border:1px solid var(--line);background:rgba(8,12,20,.55);backdrop-filter:blur(6px);padding:.45em .8em;border-radius:999px;transition:color .3s}
   .chip .p{width:9px;height:9px;border-radius:50%;background:var(--st,var(--teal))}
+  .timer{position:absolute;top:14px;right:14px;z-index:3;font-family:"IBM Plex Mono",monospace;font-size:.72rem;color:var(--dim);
+    border:1px solid var(--line);background:rgba(8,12,20,.55);padding:.45em .7em;border-radius:999px;display:none}
   .ask{padding:16px;border-top:1px solid var(--line);display:flex;gap:8px;flex-wrap:wrap}
   input[type=text]{flex:1 1 320px;background:#0b1220;border:1px solid var(--line);border-radius:11px;color:var(--ink);font:inherit;font-size:1rem;padding:.75em .9em}
   input[type=text]:focus{outline:2px solid var(--teal);outline-offset:1px}
@@ -40,10 +42,13 @@
   .ex{font-size:.82rem;color:var(--dim);border:1px solid var(--line);background:rgba(255,255,255,.02);border-radius:999px;padding:.4em .8em;cursor:pointer}
   .ex:hover{color:var(--ink);border-color:rgba(255,255,255,.2)}
   .answer{margin-top:18px;border:1px solid var(--line);border-radius:14px;background:var(--panel);padding:18px;min-height:64px}
-  .answer .q{font-family:"IBM Plex Mono",monospace;font-size:.76rem;color:var(--blue);margin-bottom:8px}
+  .answer .q{font-family:"IBM Plex Mono",monospace;font-size:.78rem;color:var(--blue);margin-bottom:8px;display:flex;align-items:baseline;gap:.5em;flex-wrap:wrap}
+  .answer .q b{color:var(--ink);font-weight:600;font-family:"Public Sans",sans-serif;font-size:.95rem}
   .answer .a{font-size:1.1rem;line-height:1.5}
+  .answer .a.working{color:var(--dim);font-size:1rem}
   .answer .a .cursor{display:inline-block;width:.5ch;height:1.05em;vertical-align:-.15em;background:var(--teal);margin-left:1px;animation:blink 1s steps(1) infinite}
   @keyframes blink{50%{opacity:0}}
+  .replayBtn{margin-top:10px;display:none;font-size:.85rem;padding:.5em .9em}
   .src{margin-top:12px;font-family:"IBM Plex Mono",monospace;font-size:.74rem;color:var(--dim);border-top:1px dashed var(--line);padding-top:10px;display:none;align-items:center;gap:.6em;flex-wrap:wrap}
   .src .tick{color:var(--teal)} .src.refuse .tick{color:var(--amber)}
   .src .pill{border:1px solid var(--line);border-radius:6px;padding:.15em .5em;color:var(--ink)}
@@ -63,6 +68,7 @@
   <div class="stage">
     <div class="orbcard">
       <div class="chip"><span class="p"></span><span id="stateName">Bereit</span></div>
+      <div class="timer" id="timer">0,0 s</div>
       <canvas id="viz"></canvas>
     </div>
     <div class="ask">
@@ -75,8 +81,9 @@
   <div class="examples" id="examples"></div>
 
   <div class="answer">
-    <div class="q" id="qEcho">—</div>
+    <div class="q" id="qEcho"></div>
     <div class="a" id="a">Stellen Sie Ihre Frage oben.</div>
+    <button class="replayBtn" id="replay">🔊 Antwort abspielen</button>
     <div class="src" id="src"><span class="tick">✓ geerdet</span><span id="srcTxt"></span></div>
   </div>
   <audio id="player"></audio>
@@ -95,19 +102,18 @@
   function resize(){const r=canvas.parentElement.getBoundingClientRect();DPR=Math.min(2,devicePixelRatio||1);W=r.width;H=r.height;canvas.width=W*DPR;canvas.height=H*DPR;ctx.setTransform(DPR,0,0,DPR,0,0);}
   new ResizeObserver(resize).observe(canvas.parentElement); resize();
   const ST={idle:{n:'Bereit',c:'#35C2A8',b:.10},listen:{n:'Zuhören',c:'#5E8DEF',b:.5},think:{n:'Verstehen',c:'#E4B24A',b:.22},
-    query:{n:'Live-Abfrage',c:'#5E8DEF',b:.3},speak:{n:'Antworten',c:'#DC8845',b:.5},done:{n:'Fertig',c:'#35C2A8',b:.12}};
-  let state='idle',amp=.1,col=[53,194,168],colT=[53,194,168],t=0;
+    query:{n:'Live-Abfrage',c:'#5E8DEF',b:.3},speak:{n:'Antworten',c:'#DC8845',b:.55},done:{n:'Fertig',c:'#35C2A8',b:.12}};
+  let state='idle',amp=.1,col=[53,194,168],colT=[53,194,168],t=0,speaking=false;
   const N=80,ph=new Float32Array(N).map(()=>Math.random()*6.28);
-  let analyser=null,audioData=null;
   const hex=h=>[parseInt(h.slice(1,3),16),parseInt(h.slice(3,5),16),parseInt(h.slice(5,7),16)];
   const lerp=(a,b,f)=>a+(b-a)*f, mix=(a,b,f)=>a.map((x,i)=>lerp(x,b[i],f)), rgba=(c,a)=>`rgba(${c[0]|0},${c[1]|0},${c[2]|0},${a})`;
   function setState(s){state=s;const S=ST[s];colT=hex(S.c);document.getElementById('stateName').textContent=S.n;
     const chip=document.querySelector('.chip');chip.style.setProperty('--st',S.c);chip.querySelector('.p').style.background=S.c;}
   function frame(ts){t=ts/1000;const S=ST[state];let target=S.b;
-    if(state==='speak'&&analyser){analyser.getByteFrequencyData(audioData);let s=0;for(let i=0;i<audioData.length;i++)s+=audioData[i];target=.2+.8*(s/audioData.length/255);}
+    if(state==='speak'&&speaking)target=S.b+.35*(0.5+0.5*Math.sin(t*11)*Math.sin(t*6.3)+0.25*Math.sin(t*23));
     else if(state==='listen')target=S.b*(.6+.5*Math.abs(Math.sin(t*3)));
     else if(state==='think'||state==='query')target=S.b*(.6+.5*Math.sin(t*5));
-    amp=lerp(amp,target,reduce?1:.15);col=mix(col,colT,.06);
+    amp=lerp(amp,Math.max(0,Math.min(1.1,target)),reduce?1:.15);col=mix(col,colT,.06);
     ctx.clearRect(0,0,W,H);const cx=W/2,cy=H/2,R=Math.min(W,H)*.24;
     const g=ctx.createRadialGradient(cx,cy,R*.2,cx,cy,R*1.8*(1+amp*.5));
     g.addColorStop(0,rgba(col,.5));g.addColorStop(.4,rgba(col,.12));g.addColorStop(1,rgba(col,0));
@@ -122,44 +128,67 @@
   requestAnimationFrame(frame);
 
   const q=document.getElementById('q'),go=document.getElementById('go'),mic=document.getElementById('mic');
-  const aEl=document.getElementById('a'),qEcho=document.getElementById('qEcho'),src=document.getElementById('src'),srcTxt=document.getElementById('srcTxt'),player=document.getElementById('player');
+  const aEl=document.getElementById('a'),qEcho=document.getElementById('qEcho'),src=document.getElementById('src'),srcTxt=document.getElementById('srcTxt');
+  const player=document.getElementById('player'),replay=document.getElementById('replay'),timerEl=document.getElementById('timer');
   const EXAMPLES=['Wie hoch ist die Straftatenquote in Kiel?','Wie viele Schulabgänger in Kiel haben keinen Hauptschulabschluss?','Wie viele Arbeitslose gibt es in Dresden?'];
   const exWrap=document.getElementById('examples');
   EXAMPLES.forEach(x=>{const b=document.createElement('button');b.className='ex';b.textContent=x;b.onclick=()=>{q.value=x;ask();};exWrap.appendChild(b);});
 
-  function type(el,text,done){el.textContent='';const cur=document.createElement('span');cur.className='cursor';el.appendChild(cur);let i=0;
-    (function tick(){if(i<=text.length){el.textContent=text.slice(0,i);el.appendChild(cur);i++;setTimeout(tick,Math.max(10,1400/Math.max(1,text.length)));}else{el.textContent=text;done&&done();}})();}
+  // instant spoken filler via the browser's own voice (bridges the compute wait)
+  let deVoice=null;
+  function pickVoice(){try{const vs=speechSynthesis.getVoices();deVoice=vs.find(v=>/de(-|_)/i.test(v.lang))||vs.find(v=>/deutsch|german/i.test(v.name))||null;}catch(e){}}
+  if(window.speechSynthesis){pickVoice();speechSynthesis.onvoiceschanged=pickVoice;}
+  function sayFiller(text){try{if(!window.speechSynthesis)return;const u=new SpeechSynthesisUtterance(text);u.lang='de-DE';if(deVoice)u.voice=deVoice;u.rate=1.02;speechSynthesis.cancel();speechSynthesis.speak(u);}catch(e){}}
+
+  const STATUS=['Ich habe Ihre Frage verstanden …','Ich suche die passende Deutschlandatlas-Tabelle …','Ich frage die Live-Daten bei der amtlichen Quelle ab …','Ich prüfe die Werte und formuliere Ihre Antwort …'];
+  let statusTimer=null,tickTimer=null,t0=0;
+  function startWait(){let i=0;aEl.className='a working';aEl.textContent=STATUS[0];
+    statusTimer=setInterval(()=>{i=(i+1)%STATUS.length;aEl.textContent=STATUS[i];},2600);
+    t0=performance.now();timerEl.style.display='block';
+    tickTimer=setInterval(()=>{timerEl.textContent=((performance.now()-t0)/1000).toFixed(1).replace('.',',')+' s';},100);}
+  function stopWait(){clearInterval(statusTimer);clearInterval(tickTimer);timerEl.style.display='none';}
+
+  function type(el,text,done){el.className='a';el.textContent='';const cur=document.createElement('span');cur.className='cursor';el.appendChild(cur);let i=0;
+    (function tick(){if(i<=text.length){el.textContent=text.slice(0,i);el.appendChild(cur);i++;setTimeout(tick,Math.max(9,1300/Math.max(1,text.length)));}else{el.textContent=text;done&&done();}})();}
+
+  function playAnswer(url){
+    if(!url){speaking=false;setState('done');return;}
+    player.src=url;replay.style.display='none';
+    player.onplay=()=>{speaking=true;setState('speak');};
+    player.onended=()=>{speaking=false;setState('done');};
+    player.play().catch(()=>{replay.style.display='inline-block';
+      replay.onclick=()=>{player.play().then(()=>{replay.style.display='none';}).catch(()=>{});};});
+  }
 
   async function ask(){
     const query=q.value.trim(); if(!query) return;
-    go.disabled=true; q.disabled=true; src.style.display='none'; src.classList.remove('refuse');
-    qEcho.textContent=query; aEl.textContent=''; setState('listen');
-    setTimeout(()=>setState('think'),500); setTimeout(()=>setState('query'),1400);
+    go.disabled=true; q.disabled=true; src.style.display='none'; src.classList.remove('refuse'); replay.style.display='none';
+    try{speechSynthesis && speechSynthesis.cancel();}catch(e){}
+    qEcho.innerHTML='<span>Ihre Frage:</span> <b></b>'; qEcho.querySelector('b').textContent=query;
+    const place=(query.match(/\b(?:in|für|von)\s+([A-ZÄÖÜ][\wäöüß-]+)/)||[])[1];
+    sayFiller('Einen Moment bitte. Ich frage die aktuellen Deutschlandatlas-Daten'+(place?(' für '+place):'')+' ab.');
+    setState('listen'); startWait();
+    setTimeout(()=>setState('think'),700); setTimeout(()=>setState('query'),1800);
     try{
       const r=await fetch('/ask',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({query})});
       const d=await r.json();
-      const ans=d.answer||d.error||'Keine Antwort erhalten.';
-      const matched=d.meta?d.meta.has_real_data!==false && !!d.meta.table:true;
-      setState('speak');
-      // play audio if present, drive orb from it
-      if(d.audioUrl){try{
-        const AC=window.AudioContext||window.webkitAudioContext; const actx=new AC();
-        const srcNode=actx.createMediaElementSource(player); analyser=actx.createAnalyser(); analyser.fftSize=64; audioData=new Uint8Array(analyser.frequencyBinCount);
-        srcNode.connect(analyser); analyser.connect(actx.destination); player.src=d.audioUrl; player.play().catch(()=>{});
-      }catch(e){player.src=d.audioUrl;player.play().catch(()=>{});}}
+      stopWait();
+      const ans=d.answer||d.error||'Dazu habe ich leider keine Antwort erhalten.';
+      const matched=d.meta?(d.meta.has_real_data!==false && !!d.meta.table):true;
+      setState('speak'); playAnswer(d.audioUrl);
       type(aEl,ans,()=>{
-        if(d.meta){src.style.display='flex';const m=d.meta;
-          if(!matched){src.classList.add('refuse');src.querySelector('.tick').textContent='⚠ ehrliche Ablehnung';srcTxt.innerHTML='keine passende Live-Tabelle';}
-          else{src.querySelector('.tick').textContent='✓ geerdet';
+        if(d.meta){const m=d.meta;src.style.display='flex';
+          if(!matched){src.classList.add('refuse');src.querySelector('.tick').textContent='⚠ ehrliche Ablehnung';srcTxt.textContent='keine passende Live-Tabelle im Datensatz';}
+          else{src.querySelector('.tick').textContent='✓ geerdet · Live-Quelle';
             srcTxt.innerHTML=`<span class="pill">${m.table||'—'}</span> <span class="pill">${m.place_resolved||m.place_name_requested||''}</span> <span class="pill">${m.live_rows_used||0} Live-Zeile(n)</span>`;}
         }
-        setTimeout(()=>setState('done'),1200); go.disabled=false; q.disabled=false;
+        if(!d.audioUrl){setTimeout(()=>setState('done'),800);}
+        go.disabled=false; q.disabled=false;
       });
-    }catch(e){aEl.textContent='Fehler: '+e.message; setState('done'); go.disabled=false; q.disabled=false;}
+    }catch(e){stopWait();aEl.className='a';aEl.textContent='Verbindungsfehler: '+e.message;setState('done');go.disabled=false;q.disabled=false;}
   }
   go.onclick=ask; q.addEventListener('keydown',e=>{if(e.key==='Enter')ask();});
 
-  // speech-to-text (browser, de-DE)
   const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
   if(SR){const rec=new SR();rec.lang='de-DE';rec.interimResults=false;
     mic.onclick=()=>{try{rec.start();mic.classList.add('on');setState('listen');}catch(e){}};
