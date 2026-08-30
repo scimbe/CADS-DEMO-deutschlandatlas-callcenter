@@ -58,7 +58,19 @@ function runPipeline(query) {
   });
 }
 
+// Make text TTS-safe: strip bracketed IPA-pronunciation spans (e.g. "Hannover [haˈnoːfɐ]") that raw
+// Wikipedia extracts put after a name — Piper would read them out as garbage. Prose/numbers untouched.
+function stripPronunciation(text) {
+  return String(text || '')
+    .replace(/[\[(（][^\[\]()（）]*[ˈˌːˑ‿˥˦˧˨˩][^\[\]()（）]*[\])）]/gu, '')   // bracketed span containing an IPA stress/length/tone mark
+    .replace(/[\[(（][^\[\]()（）]*\bIPA\b[^\[\]()（）]*[\])）]/gi, '')          // explicit "IPA: …" span
+    .replace(/\s{2,}/g, ' ')
+    .replace(/\s+([,.;:!?])/g, '$1')                                 // tidy space left before punctuation
+    .trim();
+}
+
 function ttsSpeak(text, voice = 'primary') {
+  text = stripPronunciation(text);
   if (process.env.CC_TTS !== '1') return Promise.resolve(null);
   const CT = process.env.CT_AGENT_BIN, RELAY = process.env.CT_RELAY_ENV, CH = process.env.CT_AUDIO_CHANNEL_ID;
   if (!CT || !RELAY || !CH) return Promise.resolve(null);
@@ -386,6 +398,16 @@ const server = createServer(async (req, res) => {
     for await (const c of req) chunks.push(c);
     const text = await transcribe(Buffer.concat(chunks));
     return jsonRes(res, 200, { text });
+  }
+  if (req.method === 'POST' && req.url === '/context') {
+    // fast, standalone context blurb (Wikipedia only, no ArcGIS pipeline) to fill the wait while /answer runs
+    const q = ((await readBody(req)).query || '').toString().slice(0, 300);
+    const place = placeFromQuery(q) || q;
+    const ff = await wikiFunFact(place);
+    if (!ff || !ff.text) return jsonRes(res, 200, { funfact: null });
+    const text = stripPronunciation(await narrate(ff.text, 'funfact'));   // entertaining + TTS-safe
+    let au = null; try { au = await ttsSpeak(text, 'primary'); } catch {}
+    return jsonRes(res, 200, { funfact: { ...ff, text, audioUrl: proxied(au) } });
   }
   if (req.method === 'POST' && (req.url === '/answer' || req.url === '/ask')) {
     const query = ((await readBody(req)).query || '').toString().slice(0, 300);
