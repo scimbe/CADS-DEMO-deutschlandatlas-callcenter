@@ -291,8 +291,16 @@
   async function doFollowup(query, answer){
     try{
       const f=await (await fetch('/followup',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({query,answer})})).json();
-      const items=(f.suggestions||[]).map(s=>({label:s,onClick:()=>deliver(s,true)}));
-      if(items.length) renderBubbles(items,'💬 '+(f.invite||'Möchten Sie noch etwas wissen?')); else renderExamples();
+      const sug=f.suggestions||[];
+      if(sug.length){
+        // the spoken invite is a yes/no question about sug[0] -> offer Ja/Nein as one-click, then the alternatives
+        const items=[
+          {label:'✓ Ja',best:true,onClick:()=>deliver(sug[0],true)},
+          {label:'Nein, danke',onClick:()=>renderExamples()},
+          ...sug.slice(1).map(s=>({label:s,onClick:()=>deliver(s,true)}))
+        ];
+        renderBubbles(items,'💬 '+(f.invite||'Möchten Sie noch etwas wissen?'));
+      } else renderExamples();
       queueSpeak(f.inviteAudioUrl);   // spoken after answer + fun fact, in that order
     }catch(e){}
   }

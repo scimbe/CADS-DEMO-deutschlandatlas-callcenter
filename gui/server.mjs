@@ -107,6 +107,33 @@ function placeFromQuery(q) {
   const m = (q || '').match(/\b(?:in|für|von|zu|über)\s+([A-ZÄÖÜ][\wäöüß.-]+(?:\s[A-ZÄÖÜ][\wäöüß.-]+)?)/);
   return m ? m[1].replace(/[.?!,;:]+$/, '').trim() : null;
 }
+
+// Large German Kreisfreie Städte -- every Deutschlandatlas indicator has a value for each of them,
+// so "same question, other city" is GUARANTEED answerable when the original question just was.
+const BIG_CITIES = ['Hamburg', 'München', 'Köln', 'Frankfurt', 'Stuttgart', 'Düsseldorf', 'Leipzig',
+  'Dresden', 'Hannover', 'Nürnberg', 'Bremen', 'Dortmund', 'Essen', 'Bochum', 'Rostock', 'Kiel', 'Berlin'];
+// Build follow-ups by swapping the place in a query that already resolved to real data -> always answerable.
+function swapCityFollowups(query, place, n) {
+  const p = (place || '').trim();
+  if (!p || !query.includes(p)) return [];
+  const out = [];
+  for (const c of BIG_CITIES) {
+    if (out.length >= n) break;
+    if (c === p || p.includes(c) || c.includes(p)) continue;
+    out.push(query.replace(p, c));
+  }
+  return out;
+}
+
+// Turn a (validated, answerable) suggestion into a fully-formulated spoken invite question.
+function deriveInvite(q) {
+  const s = (q || '').trim().replace(/\?+$/, '');
+  const m = s.match(/^wie\s+hoch\s+ist\s+(.+?)\s+in\s+(.+)$/i);
+  if (m) return `Möchten Sie auch wissen, wie hoch ${m[1]} in ${m[2]} ist?`;
+  const m2 = s.match(/^wie\s+viele?\s+(.+?)\s+(?:gibt es\s+)?in\s+(.+)$/i);
+  if (m2) return `Möchten Sie auch wissen, wie viele ${m2[1]} es in ${m2[2]} gibt?`;
+  return `Möchten Sie auch wissen: ${s}?`;
+}
 async function wikiFunFact(place) {
   if (!place) return null;
   try {
@@ -146,7 +173,10 @@ function answerFor(query) {
     return { ok: r.ok, answer, meta, audioUrl: proxied(au), funfact: ff, err: r.ok ? null : (r.err || 'pipeline failed') };
   })();
   specCache.set(key, promise);
-  if (specCache.size > 24) specCache.delete(specCache.keys().next().value);
+  // cache only successes: drop failed/empty runs so transient pipeline flakiness can be retried (never cached as "no data")
+  promise.then((r) => { if (!r || !r.ok || !(r.meta && r.meta.table && r.meta.has_real_data !== false)) specCache.delete(key); },
+    () => specCache.delete(key));
+  if (specCache.size > 80) specCache.delete(specCache.keys().next().value);   // keep validated follow-ups warm until clicked
   return promise;
 }
 
@@ -246,17 +276,18 @@ async function followup(query, answer) {
   };
 }
 
-// only keep follow-up suggestions the pipeline can actually answer with real data (bounded wait; raw fallback)
-async function validateSuggestions(suggestions, want = 3, timeoutMs = 22000) {
+// keep ONLY the suggestions the pipeline can actually answer with real data.
+// No raw fallback -- an unvalidated (possibly unanswerable) suggestion must never be shown.
+// Whatever validates within the budget is returned; the rest are dropped (caller has a guaranteed set to fall back on).
+async function validateSuggestions(suggestions, want = 3, timeoutMs = 20000) {
   if (!suggestions.length) return [];
+  const good = [];
   const checks = suggestions.map((s) => answerFor(s)
-    .then((r) => ({ s, ok: !!(r && r.ok && r.meta && r.meta.has_real_data !== false && r.meta.table) }))
-    .catch(() => ({ s, ok: false })));
-  const timeout = new Promise((res) => setTimeout(() => res(null), timeoutMs));
-  const settled = await Promise.race([Promise.all(checks), timeout]);
-  if (!settled) return suggestions.slice(0, want);          // timed out -> fall back to grounded raw
-  const good = settled.filter((x) => x.ok).map((x) => x.s);
-  return good.length ? good.slice(0, want) : suggestions.slice(0, want);
+    .then((r) => { if (r && r.ok && r.meta && r.meta.has_real_data !== false && r.meta.table) good.push(s); })
+    .catch(() => {}));
+  const timeout = new Promise((res) => setTimeout(res, timeoutMs));
+  await Promise.race([Promise.all(checks), timeout]);   // take whatever validated by the deadline
+  return good.slice(0, want);
 }
 
 async function readBody(req) { let b = ''; for await (const c of req) b += c; try { return JSON.parse(b); } catch { return {}; } }
@@ -288,6 +319,11 @@ const server = createServer(async (req, res) => {
     const query = ((await readBody(req)).query || '').toString().slice(0, 300);
     if (!query.trim()) return jsonRes(res, 400, { error: 'empty query' });
     const r = await answerFor(query);
+    // warm follow-up candidates in the background so /followup can validate them from cache (some cities have no data)
+    if (r.ok && r.meta && r.meta.table && r.meta.has_real_data !== false) {
+      const place = placeFromQuery(query) || r.meta.place_name_requested || r.meta.place_resolved || '';
+      swapCityFollowups(query, place, 6).forEach((s) => { answerFor(s); });   // fire-and-forget speculation
+    }
     return jsonRes(res, r.ok ? 200 : 502, { query, ...r });
   }
   if (req.method === 'POST' && req.url === '/followup') {
@@ -295,11 +331,22 @@ const server = createServer(async (req, res) => {
     const query = (b.query || '').toString().slice(0, 300);
     if (!query.trim()) return jsonRes(res, 400, { error: 'empty query' });
     const f = await followup(query, (b.answer || '').toString().slice(0, 600));
-    f.suggestions.forEach((s) => answerFor(s));   // start speculation for all candidates
-    const validated = await validateSuggestions(f.suggestions, 3);   // keep only answerable ones (bounded)
+    const cur = await answerFor(query);   // cached from the answer just delivered
+    const curHasData = !!(cur && cur.ok && cur.meta && cur.meta.table && cur.meta.has_real_data !== false);
+    const place = placeFromQuery(query) || (cur && cur.meta && (cur.meta.place_name_requested || cur.meta.place_resolved)) || '';
+    // Candidates: same-question place swaps (warmed during /answer) + LLM variety. NONE is trusted blindly --
+    // the pipeline genuinely has no data for some cities, so every candidate is validated against a live run.
+    const swaps = curHasData ? swapCityFollowups(query, place, 6) : [];
+    const seen = new Set([query]); const candidates = [];
+    for (const s of [...swaps, ...f.suggestions]) { if (s && !seen.has(s)) { seen.add(s); candidates.push(s); } }
+    candidates.forEach((s) => answerFor(s));   // warm (swaps are mostly cache hits from /answer already)
+    const validated = await validateSuggestions(candidates, 3, 35000);   // ONLY answerable ones survive
+    // spoken invite must also be answerable -> derive it from a validated suggestion (fall back to a safe generic)
+    const inviteText = validated.length ? deriveInvite(validated[0])
+      : 'Möchten Sie noch etwas aus dem Deutschlandatlas wissen?';
     let inviteAudioUrl = null;
-    if (f.invite) { try { inviteAudioUrl = proxied(await ttsSpeak(f.invite, 'primary')); } catch {} }
-    return jsonRes(res, 200, { ...f, suggestions: validated, inviteAudioUrl });
+    try { inviteAudioUrl = proxied(await ttsSpeak(inviteText, 'primary')); } catch {}
+    return jsonRes(res, 200, { invite: inviteText, suggestions: validated, inviteAudioUrl });
   }
   if (req.method === 'GET' && /^\/fillers\/filler[1-9]\.wav$/.test(req.url)) {
     try { res.writeHead(200, { 'content-type': 'audio/wav', 'cache-control': 'public, max-age=3600' }); res.end(await readFile(join(__dir, req.url.replace(/^\//, '')))); }
