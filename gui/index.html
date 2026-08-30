@@ -53,6 +53,9 @@
   .answer .a .cursor{display:inline-block;width:.5ch;height:1.05em;vertical-align:-.15em;background:var(--teal);margin-left:1px;animation:blink 1s steps(1) infinite}
   @keyframes blink{50%{opacity:0}}
   .replayBtn{margin-top:10px;display:none;font-size:.85rem;padding:.5em .9em}
+  .playctl{margin-top:10px;display:none;gap:8px}
+  .playctl button{font-size:.85rem;padding:.5em .9em}
+  .playctl #stopBtn{border-color:rgba(234,106,106,.4);color:var(--red)}
   .choices{display:none;flex-direction:column;gap:8px;margin-top:14px}
   .choices .note{font-size:.78rem;color:var(--dimmer);font-family:"IBM Plex Mono",monospace;display:flex;align-items:center;gap:.5em}
   .choices .note .spin{width:9px;height:9px;border-radius:50%;border:1.5px solid var(--teal);border-top-color:transparent;animation:sp .8s linear infinite}
@@ -103,6 +106,7 @@
     <div class="q" id="qEcho"></div>
     <div class="a" id="a">Stellen Sie Ihre Frage oben.</div>
     <button class="replayBtn" id="replay">🔊 Antwort abspielen</button>
+    <div class="playctl" id="playctl"><button id="pauseBtn">⏸ Pause</button><button id="stopBtn">⏹ Stopp</button></div>
     <div class="src" id="src"><span class="tick">✓ geerdet</span><span id="srcTxt"></span></div>
     <div class="funfact" id="funfact"></div>
   </div>
@@ -179,28 +183,60 @@
   function type(el,text,done){el.className='a';el.textContent='';const cur=document.createElement('span');cur.className='cursor';el.appendChild(cur);let i=0;
     (function tick(){if(i<=text.length){el.textContent=text.slice(0,i);el.appendChild(cur);i++;setTimeout(tick,Math.max(9,1300/Math.max(1,text.length)));}else{el.textContent=text;done&&done();}})();}
 
+  // playback controls (interrupt + pause), shown while Thorsten is speaking
+  const playctl=document.getElementById('playctl'),pauseBtn=document.getElementById('pauseBtn'),stopBtn=document.getElementById('stopBtn');
+  let userPaused=false;
+  function showCtl(){playctl.style.display='flex';}
+  function hideCtl(){playctl.style.display='none';userPaused=false;pauseBtn.textContent='⏸ Pause';}
+
   function playAnswer(url){
     stopFiller();
     if(!url){speaking=false;setState('done');answerDone=true;drainSpeak();return;}
-    player.src=url;replay.style.display='none';
-    player.onplay=()=>{speaking=true;setState('speak');};
+    replay.style.display='none';
+    player.onplay=()=>{speaking=true;setState('speak');showCtl();};
     player.onended=()=>{speaking=false;setState('done');answerDone=true;drainSpeak();};
-    player.play().catch(()=>{replay.style.display='inline-block';
+    const start=()=>player.play().catch(()=>{replay.style.display='inline-block';
       replay.onclick=()=>{player.play().then(()=>{replay.style.display='none';}).catch(()=>{});};});
+    player.oncanplaythrough=()=>{player.oncanplaythrough=null;if(!userPaused)start();};   // wait for buffer so the start isn't clipped
+    player.src=url;player.load();
+    setTimeout(()=>{if(player.paused&&player.currentTime===0&&!userPaused)start();},500);  // fallback if canplaythrough is slow
   }
 
   let lastQuery=null,lastAnswer=null;   // conversation context for follow-ups
   const ffEl=document.getElementById('funfact');
-  function reset(){src.style.display='none';src.classList.remove('refuse');replay.style.display='none';ffEl.style.display='none';}
-  function playClip(url){try{stopFiller();fillerEl.src=url;fillerEl.play().catch(()=>{});}catch(e){}}
+  function reset(){src.style.display='none';src.classList.remove('refuse');replay.style.display='none';ffEl.style.display='none';hideCtl();}
+  function playClip(url){try{stopFiller();fillerEl.onended=null;showCtl();
+    const start=()=>fillerEl.play().catch(()=>{});
+    fillerEl.oncanplaythrough=()=>{fillerEl.oncanplaythrough=null;if(!userPaused)start();};
+    fillerEl.src=url;fillerEl.load();
+    setTimeout(()=>{if(fillerEl.paused&&fillerEl.currentTime===0&&!userPaused)start();},500);
+  }catch(e){}}
 
   // sequential Thorsten voice queue AFTER the answer audio: fun fact first, then the follow-up invite
   let speakQ=[], speaking2=false, answerDone=false;
   function queueSpeak(url){ if(url){ speakQ.push(url); if(answerDone) drainSpeak(); } }
-  function drainSpeak(){ if(speaking2||!speakQ.length) return; speaking2=true; const u=speakQ.shift();
-    try{ stopFiller(); fillerEl.src=u; fillerEl.onended=()=>{ speaking2=false; drainSpeak(); };
-      fillerEl.play().catch(()=>{ speaking2=false; drainSpeak(); }); }
+  function drainSpeak(){ if(speaking2||!speakQ.length||userPaused) return; speaking2=true; showCtl(); const u=speakQ.shift();
+    try{ stopFiller();
+      fillerEl.onended=()=>{ speaking2=false; drainSpeak(); };
+      const start=()=>fillerEl.play().catch(()=>{ speaking2=false; drainSpeak(); });
+      fillerEl.oncanplaythrough=()=>{fillerEl.oncanplaythrough=null;if(!userPaused)start();};
+      fillerEl.src=u; fillerEl.load();
+      setTimeout(()=>{if(fillerEl.paused&&fillerEl.currentTime===0&&!userPaused&&speaking2)start();},500); }
     catch(e){ speaking2=false; drainSpeak(); } }
+
+  function togglePause(){
+    if(!userPaused){ userPaused=true; pauseBtn.textContent='▶︎ Weiter';
+      [player,fillerEl].forEach(el=>{try{if(el&&!el.paused)el.pause();}catch(e){}}); }
+    else { userPaused=false; pauseBtn.textContent='⏸ Pause'; let resumed=false;
+      [player,fillerEl].forEach(el=>{try{if(el&&el.src&&el.paused&&el.currentTime>0&&!el.ended){el.play().catch(()=>{});resumed=true;}}catch(e){}});
+      if(!resumed) drainSpeak(); }   // nothing mid-clip -> continue queued clips
+  }
+  function stopAll(){   // interrupt: halt all speech and clear the queue
+    speakQ=[]; speaking2=false; userPaused=false; pauseBtn.textContent='⏸ Pause';
+    [player,fillerEl].forEach(el=>{try{el.pause();el.currentTime=0;el.onended=null;}catch(e){}});
+    speaking=false; setState('done'); hideCtl();
+  }
+  pauseBtn.onclick=togglePause; stopBtn.onclick=stopAll;
 
   // phase 1 — understand & guide (targeted clarifying question; speculation starts server-side)
   async function ask(){

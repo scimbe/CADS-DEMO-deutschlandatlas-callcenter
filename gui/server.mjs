@@ -115,7 +115,7 @@ async function wikiFunFact(place) {
     if (!r.ok) return null;
     const j = await r.json();
     if (j.type === 'disambiguation' || !j.extract) return null;
-    // first 1-2 sentences, taken VERBATIM from Wikipedia -- never rephrased, never LLM-touched
+    // first 1-2 sentences, taken VERBATIM from Wikipedia as the source of truth (narrate() later restyles it, number-guarded)
     const text = j.extract.split(/(?<=[.!?])\s+/).slice(0, 2).join(' ').trim();
     if (text.length < 20) return null;
     return { text, title: j.title || place, url: j.content_urls?.desktop?.page || ('https://de.wikipedia.org/wiki/' + encodeURIComponent(place)) };
@@ -130,14 +130,19 @@ function answerFor(query) {
   if (specCache.has(key)) return specCache.get(key);
   const promise = (async () => {
     const [r, funfact] = await Promise.all([runPipeline(key), wikiFunFact(placeFromQuery(key))]);  // Wikipedia in parallel
-    const answer = r.final?.text || r.final?.answer || null;
+    const rawAnswer = r.final?.text || r.final?.answer || null;
     const meta = r.final?.meta || null;
+    // narrative style for the answer + entertaining spoken style for the fun fact -- strictly grounded (number-guarded)
+    const [answer, ffText] = await Promise.all([
+      rawAnswer ? narrate(rawAnswer, 'answer') : Promise.resolve(null),
+      funfact ? narrate(funfact.text, 'funfact') : Promise.resolve(null),
+    ]);
     let au = null, ffAu = null;
     await Promise.all([                                              // answer + fun-fact spoken in parallel (both Thorsten)
       answer ? ttsSpeak(answer, 'primary').then((u) => { au = u; }, () => {}) : Promise.resolve(),
-      funfact ? ttsSpeak(funfact.text, 'primary').then((u) => { ffAu = u; }, () => {}) : Promise.resolve(),
+      ffText ? ttsSpeak(ffText, 'primary').then((u) => { ffAu = u; }, () => {}) : Promise.resolve(),
     ]);
-    const ff = funfact ? { ...funfact, audioUrl: proxied(ffAu) } : null;
+    const ff = funfact ? { ...funfact, text: ffText || funfact.text, audioUrl: proxied(ffAu) } : null;
     return { ok: r.ok, answer, meta, audioUrl: proxied(au), funfact: ff, err: r.ok ? null : (r.err || 'pipeline failed') };
   })();
   specCache.set(key, promise);
@@ -157,6 +162,31 @@ async function llmJSON(system, user) {
     const j = await resp.json();
     return JSON.parse(j.choices?.[0]?.message?.content || '{}');
   } catch { return {}; }
+}
+
+// Rephrase into a more narrative / spoken German style WITHOUT changing facts.
+// Numbers are the falsification risk: if any number from the source is missing in the output, keep the original.
+async function narrate(text, mode) {
+  const srcT = (text || '').trim();
+  if (srcT.length < 12) return srcT;
+  const base = (process.env.LITELLM_BASE_URL || '').replace(/\/$/, '');
+  const key = process.env.LITELLM_API_KEY, model = process.env.LITELLM_DEFAULT_MODEL || 'local-devstral-small2';
+  const sys = mode === 'funfact'
+    ? 'Formuliere den folgenden Wikipedia-Auszug in einen kurzen, unterhaltsamen, gesprochenen deutschen Sprechtext um (maximal 2 Sätze). Behalte JEDE Zahl, JEDEN Namen und JEDEN Fakt exakt bei; erfinde NICHTS und verfälsche nichts. Nur der Stil wird lockerer und erzählender, der Inhalt bleibt gleich. Antworte NUR mit dem umformulierten Text, ohne Anführungszeichen, ohne Vorrede.'
+    : 'Formuliere die folgende Datenauskunft in flüssigen, leicht erzählenden deutschen Sprechtext um (1 bis 3 Sätze, nicht nur kurze Hauptsätze aneinanderreihen). Behalte JEDE Zahl, JEDEN Orts- und Eigennamen und JEDEN Fakt exakt bei; erfinde NICHTS hinzu. Antworte NUR mit dem umformulierten Text, ohne Anführungszeichen, ohne Vorrede.';
+  try {
+    const resp = await fetch(base + '/chat/completions', {
+      method: 'POST', headers: { authorization: 'Bearer ' + key, 'content-type': 'application/json' },
+      body: JSON.stringify({ model, temperature: 0.4, max_tokens: 260,
+        messages: [{ role: 'system', content: sys }, { role: 'user', content: srcT }] }),
+    });
+    const j = await resp.json();
+    let out = (j.choices?.[0]?.message?.content || '').trim().replace(/^["'»“]+|["'«”]+$/g, '').trim();
+    if (!out || out.length < 10 || out.length > srcT.length * 3 + 120) return srcT;   // sanity bounds
+    const nums = (srcT.match(/\d[\d.,]*/g) || []).map((n) => n.replace(/[.,]+$/, ''));  // grounding guard
+    for (const n of nums) { if (!out.includes(n)) return srcT; }
+    return out;
+  } catch { return srcT; }
 }
 
 const UNDERSTAND_SYS = [
