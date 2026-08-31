@@ -360,13 +360,32 @@ function verstehenText(query) {
 
 // Part 2 "Überbrücken": a short bridge — first turn introduces the service (varied), later turns
 // loosely reference the previous interaction. Prepared in advance by the client so it plays instantly.
+// Turn 0 (first question): a welcome that ALSO conveys one genuinely helpful fact about the service /
+// the Bunsenbrenner marketplace it runs on (operator: erste Frage = evtl. hilfreiche Info über
+// Bunsenbrenner selbst). Varied so repeat visits don't hear the same opener.
 const SERVICE_INTROS = [
-  'Willkommen beim Deutschlandatlas-Sprach-Callcenter. Ich beantworte Ihre Fragen zu Regionaldaten in Deutschland — immer geerdet auf echten, live abgefragten Zahlen.',
-  'Schön, dass Sie da sind. Dies ist das Deutschlandatlas-Sprach-Callcenter: Fragen Sie mich zu Kriminalität, Bildung, Beschäftigung oder Wohnen in Ihrer Region.',
-  'Hier spricht das Deutschlandatlas-Callcenter. Ich hole für Sie echte Regionaldaten aus dem Deutschlandatlas — nichts erfunden, alles direkt aus der Quelle.',
-  'Guten Tag, willkommen beim Sprach-Callcenter zum Deutschlandatlas. Stellen Sie mir Ihre Frage zu einem Ort in Deutschland, ich sehe für Sie in den echten Daten nach.',
+  'Willkommen beim Deutschlandatlas-Sprach-Callcenter. Übrigens: dies ist eine Demo auf dem Bunsenbrenner-Marktplatz — jede Antwort ist auf echten, live abgefragten Zahlen geerdet, nichts wird erfunden.',
+  'Schön, dass Sie da sind. Gut zu wissen: Ich laufe als Bunsenbrenner-Demo über einen abgesicherten Tunnel, und das Sprachmodell dahinter arbeitet DSGVO-konform in Deutschland — fragen Sie mich zu Kriminalität, Bildung, Beschäftigung oder Wohnen in Ihrer Region.',
+  'Hier spricht das Deutschlandatlas-Callcenter. Kleiner Hinweis vorweg: die Zahlen kommen direkt aus dem offiziellen Deutschlandatlas, und wenn ich zu etwas keine Daten habe, sage ich das ehrlich, statt zu raten.',
+  'Guten Tag, willkommen beim Sprach-Callcenter zum Deutschlandatlas. Ein Tipp: Sie können mich ganz natürlich fragen, etwa nach der Arbeitslosenquote oder der Bevölkerung eines Ortes — ich sehe dann live in den echten Daten nach.',
+  'Willkommen. Dies ist eine von mehreren Bunsenbrenner-Demos, die zeigen, wie sich KI faktentreu einsetzen lässt — hier für Regionaldaten aus dem Deutschlandatlas. Nennen Sie mir einfach einen Ort und eine Kennzahl.',
+  'Schön, dass Sie reinschauen. Damit Sie wissen, womit Sie es zu tun haben: Ich verbinde ein Sprachmodell mit der echten Deutschlandatlas-Datenbank und prüfe jede genannte Zahl gegen die Quelle. Fragen Sie los.',
 ];
 const BRIDGE_FALLBACKS = ['Kommen wir zu Ihrer nächsten Frage.', 'Gerne sehe ich für Sie weiter nach.', 'Bleiben wir gleich dran — einen Moment, ich schaue nach.', 'Sehr gern — ich prüfe das eben für Sie.', 'Gut, dann schauen wir uns das gemeinsam an.', 'Einen Augenblick, ich hole die passenden Zahlen.'];
+
+// When the caller asks a NEW topic instead of taking the offered follow-up, we open with a warm
+// acknowledgement that the fresh question is also worth answering — pre-synthesized by the client
+// (parallel to the answer) so it can play instantly in place of the usual bridge. Varied.
+const TOPIC_ACKS = [
+  'Oh, eine ganz neue Richtung — auch das schaue ich Ihnen gerne nach.',
+  'Interessante neue Frage — sehr gern, dazu sehe ich für Sie in den Daten nach.',
+  'Ein anderes Thema, kein Problem — einen Moment, ich hole die passenden Zahlen.',
+  'Auch eine spannende Frage — kommen wir gleich dazu.',
+  'Gerne, ganz frisch gefragt — ich schaue direkt für Sie nach.',
+  'Wechseln wir das Thema — mache ich gern, ich prüfe das eben.',
+];
+let ackRot = 0;
+function topicAckText() { return TOPIC_ACKS[(ackRot++) % TOPIC_ACKS.length]; }
 let introRot = 0;
 async function introBridge(context) {
   // Invariant I3: the bridge identity is decided by turnCount (how many turns were already
@@ -642,6 +661,13 @@ const server = createServer(async (req, res) => {
     // part 2 "Überbrücken" — prepared in advance by the client (first turn: service intro; later: bridge)
     const b = await readBody(req);
     const text = await introBridge(b.context || {});
+    let au = null; try { au = await ttsSpeak(text, 'primary'); } catch {}
+    return jsonRes(res, 200, { text, audioUrl: proxied(au) });
+  }
+  if (req.method === 'POST' && req.url === '/topicack') {
+    // a "that's also an interesting question" opener, pre-synthesized so it can play the instant the
+    // caller asks a NEW topic instead of the offered follow-up (client decides when to use it).
+    const text = stripPronunciation(topicAckText());
     let au = null; try { au = await ttsSpeak(text, 'primary'); } catch {}
     return jsonRes(res, 200, { text, audioUrl: proxied(au) });
   }
