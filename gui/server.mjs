@@ -43,7 +43,17 @@ try {
   CATALOG_SUMMARY = lines.join('\n');
 } catch {}
 
+// --- lightweight per-request trace so a caller (or /debug/trace) can see WHY a query behaved as it did ---
+const traceBuf = [];
+let traceSeq = 0;
+function trace(tag, obj) {
+  const e = { i: ++traceSeq, ms: Date.now(), tag, ...obj };
+  traceBuf.push(e); if (traceBuf.length > 120) traceBuf.shift();
+  try { console.log('[trace] ' + tag + ' ' + JSON.stringify(obj)); } catch {}
+}
+
 function runPipeline(query) {
+  const t0 = Date.now();
   return new Promise((resolve) => {
     const p = spawn('node', [RUNTIME, '--query', query], { cwd: REPO_ROOT, env: process.env });
     let out = '', err = '';
@@ -53,6 +63,11 @@ function runPipeline(query) {
       let final = null;
       const lines = out.trim().split('\n').filter(Boolean);
       for (let i = lines.length - 1; i >= 0; i--) { try { final = JSON.parse(lines[i]); break; } catch {} }
+      const m = final && final.meta;
+      trace('pipeline', { query, ok: code === 0 && final != null, code, took_ms: Date.now() - t0,
+        table: m && m.table, has_real_data: m && m.has_real_data, rows: m && m.live_rows_used,
+        place: m && (m.place_resolved || m.place_name_requested), note: (m && (m.reformulation_note || m.note)) || null,
+        err_tail: err ? err.replace(/\s+/g, ' ').slice(-260) : null });
       resolve({ ok: code === 0 && final != null, final, code, err: err.slice(-600) });
     });
   });
@@ -519,7 +534,7 @@ const jsonRes = (res, code, obj) => { res.writeHead(code, { 'content-type': 'app
 
 const server = createServer(async (req, res) => {
   if (req.method === 'GET' && (req.url === '/' || req.url === '/index.html')) {
-    try { const buf = await readFile(join(__dir, 'index.html')); res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); res.end(buf); }
+    try { const buf = await readFile(join(__dir, 'index.html')); res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store, must-revalidate' }); res.end(buf); }
     catch { res.writeHead(500); res.end('index.html missing'); }
     return;
   }
@@ -528,6 +543,7 @@ const server = createServer(async (req, res) => {
     const query = (b.query || '').toString().slice(0, 300);
     if (!query.trim()) return jsonRes(res, 400, { error: 'empty query' });
     const u = await understand(query, b.context);
+    trace('understand', { query, precise: u.precise, kind: u.kind, clarify: (u.clarify || '').slice(0, 70), best_guess: u.best_guess, slots: u.slots });
     answerFor(u.best_guess);                       // fire speculation in the background
     let clarifyAudioUrl = null;
     if (!u.precise && u.clarify) { try { clarifyAudioUrl = proxied(await ttsSpeak(u.clarify, 'primary')); } catch {} }
@@ -568,6 +584,7 @@ const server = createServer(async (req, res) => {
     const query = ((await readBody(req)).query || '').toString().slice(0, 300);
     if (!query.trim()) return jsonRes(res, 400, { error: 'empty query' });
     const r = await answerFor(query);
+    trace('answer', { query, ok: r.ok, table: r.meta && r.meta.table, has_real_data: r.meta && r.meta.has_real_data, rows: r.meta && r.meta.live_rows_used, reused: r.reused, err: r.err });
     // warm follow-up candidates in the background so /followup can validate them from cache (some cities have no data)
     if (r.ok && r.meta && r.meta.table && r.meta.has_real_data !== false) {
       const place = placeFromQuery(query) || r.meta.place_name_requested || r.meta.place_resolved || '';
@@ -617,6 +634,16 @@ const server = createServer(async (req, res) => {
       res.writeHead(200, { 'content-type': up.headers.get('content-type') || 'audio/wav', 'cache-control': 'no-store', 'access-control-allow-origin': '*' });
       res.end(Buffer.from(await up.arrayBuffer()));
     } catch { res.writeHead(500); res.end('proxy err'); }
+    return;
+  }
+  if (req.method === 'GET' && req.url.startsWith('/debug/trace')) {
+    // recent per-request trace (understand decision + pipeline result) so a run can be explained
+    const pretty = traceBuf.slice(-60).map((e) => {
+      const d = new Date(e.ms).toISOString().slice(11, 19);
+      return `${d} #${e.i} ${e.tag}\t${JSON.stringify((({ i, ms, tag, ...rest }) => rest)(e))}`;
+    }).join('\n');
+    res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
+    res.end(pretty || '(no trace yet — make a request first)');
     return;
   }
   res.writeHead(404); res.end('not found');
