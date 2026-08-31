@@ -53,7 +53,8 @@
   .answer .a .cursor{display:inline-block;width:.5ch;height:1.05em;vertical-align:-.15em;background:var(--teal);margin-left:1px;animation:blink 1s steps(1) infinite}
   @keyframes blink{50%{opacity:0}}
   .replayBtn{margin-top:10px;display:none;font-size:.85rem;padding:.5em .9em}
-  .playctl{display:none;gap:8px;align-items:center}
+  .playctl{display:flex;gap:8px;align-items:center;opacity:.55;transition:opacity .2s}
+  .playctl.active{opacity:1}
   .playctl button{font-size:.85rem;padding:.5em .9em}
   .playctl #stopBtn{border-color:rgba(234,106,106,.4);color:var(--red)}
   .choices{display:none;flex-direction:column;gap:8px;margin-top:14px}
@@ -189,8 +190,8 @@
   // playback controls (interrupt + pause), shown while Thorsten is speaking
   const playctl=document.getElementById('playctl'),pauseBtn=document.getElementById('pauseBtn'),stopBtn=document.getElementById('stopBtn');
   let userPaused=false;
-  function showCtl(){playctl.style.display='flex';}
-  function hideCtl(){playctl.style.display='none';userPaused=false;pauseBtn.textContent='⏸ Pause';}
+  function showCtl(){playctl.classList.add('active');}
+  function hideCtl(){playctl.classList.remove('active');userPaused=false;pauseBtn.textContent='⏸ Pause';}
 
   // Ordered sequential speech queue: a turn is spoken in FIXED order, each part ALWAYS finishing
   // before the next (never cut off): 1 Verstehen - 2 Ueberbruecken - 3 Wussten Sie schon -
