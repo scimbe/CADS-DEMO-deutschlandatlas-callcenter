@@ -51,9 +51,13 @@ FROM node:22-bookworm-slim AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates ffmpeg && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 
-# app code — GUI + the live pipeline runtime + the catalog
+# app code — GUI + the live pipeline runtime + the catalog + the n8n workflow definition
+# it replays (missing this made /answer/-followup fail on every query: n8n_workflow_runtime.mjs
+# reads n8n/callcenter-workflow.json at request time, not just at import — caught by actually
+# POSTing to /answer in the built image, not just confirming the container started).
 COPY gui ./gui
 COPY scripts ./scripts
+COPY n8n ./n8n
 COPY catalog.json ./catalog.json
 
 # whisper-cli + model. Copying the whole build/bin/ dir, not just the whisper-cli binary:
