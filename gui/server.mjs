@@ -65,7 +65,11 @@ function runPipeline(query) {
       const lines = out.trim().split('\n').filter(Boolean);
       for (let i = lines.length - 1; i >= 0; i--) { try { final = JSON.parse(lines[i]); break; } catch {} }
       const m = final && final.meta;
+      // pull the runtime's per-stage TIMING traces (catalog-match-LLM / arcgis-total / phrasing-LLM)
+      // out of stderr so the breakdown shows in the log + /debug/trace, not just the total took_ms.
+      const timings = (err.match(/TIMING [^\n]+/g) || []).map((l) => l.replace('TIMING ', '').trim());
       trace('pipeline', { query, ok: code === 0 && final != null, code, took_ms: Date.now() - t0,
+        timings: timings.length ? timings : undefined,
         table: m && m.table, has_real_data: m && m.has_real_data, rows: m && m.live_rows_used,
         place: m && (m.place_resolved || m.place_name_requested), note: (m && (m.reformulation_note || m.note)) || null,
         err_tail: err ? err.replace(/\s+/g, ' ').slice(-260) : null });

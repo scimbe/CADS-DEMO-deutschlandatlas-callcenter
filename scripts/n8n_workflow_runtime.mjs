@@ -186,6 +186,7 @@ async function main() {
     matchOut = runCode("Validate Catalog Match", forced);
   } else {
     // 4. LLM Match Catalog -- REAL call to the litellm-proxy
+    const _tCM = Date.now();
     const matchResp = await llmChat({
       system: promptOut.llmSystem,
       user: promptOut.llmUser,
@@ -194,6 +195,7 @@ async function main() {
       json_object: true,
     });
     setOutput("LLM Match Catalog", matchResp);
+    trace("TIMING catalog-match-LLM", (Date.now() - _tCM) + "ms");
 
     // 5. Validate Catalog Match
     matchOut = runCode("Validate Catalog Match", matchResp);
@@ -206,6 +208,7 @@ async function main() {
   }
 
   // 6. Get Indicator MapServer Metadata
+  const _tArc = Date.now();
   const meta = await esriGet(matchOut.catalogRow.url, { f: "json" });
   setOutput("Get Indicator MapServer Metadata", meta);
 
@@ -259,10 +262,12 @@ async function main() {
     }
   }
 
+  trace("TIMING arcgis-total", (Date.now() - _tArc) + "ms");
   // Build Phrasing Prompt
   const phrasePrompt = runCode("Build Phrasing Prompt", phrasingInput);
 
   // LLM Phrase Answer -- REAL call to the litellm-proxy
+  const _tPh = Date.now();
   const phraseResp = await llmChat({
     system: phrasePrompt.llmPhraseSystem,
     user: phrasePrompt.llmPhraseUser,
@@ -271,6 +276,7 @@ async function main() {
     json_object: false,
   });
   setOutput("LLM Phrase Answer", phraseResp);
+  trace("TIMING phrasing-LLM", (Date.now() - _tPh) + "ms");
 
   // Extract Final Answer
   const final = runCode("Extract Final Answer", phraseResp);
