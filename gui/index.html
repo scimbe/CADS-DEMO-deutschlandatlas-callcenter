@@ -29,6 +29,10 @@
   .stage{margin-top:22px;border:1px solid var(--line);border-radius:16px;overflow:hidden;background:linear-gradient(180deg,rgba(255,255,255,.02),transparent)}
   .orbcard{position:relative;height:230px}
   #viz{position:absolute;inset:0;width:100%;height:100%}
+  .welcomehint{position:absolute;left:50%;bottom:16px;transform:translateX(-50%);z-index:3;pointer-events:none;
+    font-size:.82rem;color:var(--dim);background:var(--chip-bg);border:1px solid var(--line);backdrop-filter:blur(6px);
+    padding:.5em .9em;border-radius:999px;transition:opacity .4s;text-align:center;max-width:92%}
+  .welcomehint.gone{opacity:0}
   .chip{position:absolute;top:14px;left:14px;z-index:3;display:flex;align-items:center;gap:.55em;font-family:"IBM Plex Mono",monospace;font-size:.72rem;
     border:1px solid var(--line);background:var(--chip-bg);backdrop-filter:blur(6px);padding:.45em .8em;border-radius:999px;transition:color .3s}
   .chip .p{width:9px;height:9px;border-radius:50%;background:var(--st,var(--teal))}
@@ -113,6 +117,7 @@
       <div class="chip"><span class="p"></span><span id="stateName">Bereit</span></div>
       <div class="timer" id="timer">0,0 s</div>
       <canvas id="viz"></canvas>
+      <div class="welcomehint" id="welcomeHint">👋 Willkommen — klicken oder tippen, dann begrüße ich Sie</div>
     </div>
     <div class="ask">
       <input type="text" id="q" placeholder="Ihre Frage, z. B. Wie hoch ist die Straftatenquote in Kiel?" autocomplete="off">
@@ -281,6 +286,23 @@
   async function prepareTopicAck(){ nextTopicAck=await fetchTopicAck(); }
   prepareTopicAck();
 
+  // #1: spoken greeting on the caller's FIRST interaction. Browsers block audio autoplay on a bare
+  // page load, so we prepare the clip up front and play it the instant the user first clicks/taps —
+  // as close to "on load" as the autoplay policy allows. Distinct from the turn-0 service intro.
+  let greeted=false, greetingClip=null;
+  async function prepareGreeting(){ try{ greetingClip=(await (await fetch('/greeting',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({})})).json()).audioUrl; }catch(e){ greetingClip=null; } }
+  prepareGreeting();
+  const welcomeHintEl=document.getElementById('welcomeHint');
+  function hideWelcome(){ if(welcomeHintEl) welcomeHintEl.classList.add('gone'); }
+  function firstGesture(e){
+    if(greeted) return;
+    unlockAudio();                                                 // satisfy autoplay within the gesture
+    if(e && e.target && e.target.closest && e.target.closest('#go')) return;  // they're submitting a question -> the intro is the opener
+    greeted=true; hideWelcome();
+    if(greetingClip && seq.length===0 && !(q.value && q.value.trim())){ newTurn(); const s=slot(); fill(s, greetingClip); }
+  }
+  document.addEventListener('pointerdown', firstGesture, true);
+
   // start-of-turn bridge (P1): ALWAYS reserve the slot first (keeps the P1..P5 order intact), then fill
   // it the instant the clip is ready — from the prefetch if present, otherwise fetched now. It never
   // leaves P1 empty and never races the previous turn's prepareNextIntro(). Presenting a bridge advances
@@ -297,6 +319,7 @@
   // phase 1 - understand & guide (targeted clarifying question; speculation starts server-side)
   async function ask(){
     const query=q.value.trim(); if(!query) return; unlockAudio();
+    greeted=true; hideWelcome();   // asking counts as greeted — the turn-0 intro is the opener, no separate greeting
     const pivot=followupActive; followupActive=false;   // typed a new question while a follow-up was on offer
     go.disabled=true; q.disabled=true; reset(); newTurn();
     // #5: on a topic pivot, open with the pre-synthesized "also an interesting question" ack instead of

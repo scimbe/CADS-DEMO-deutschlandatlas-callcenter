@@ -386,6 +386,19 @@ const TOPIC_ACKS = [
 ];
 let ackRot = 0;
 function topicAckText() { return TOPIC_ACKS[(ackRot++) % TOPIC_ACKS.length]; }
+
+// #1: a short spoken greeting played on the caller's FIRST interaction (browsers block autoplay on
+// bare load, so it fires on the first gesture). Kept distinct from the turn-0 service intro (which
+// carries the helpful Bunsenbrenner info) so the two don't repeat. Varied.
+const GREETINGS = [
+  'Willkommen — schön, dass Sie da sind. Stellen Sie mir einfach Ihre Frage.',
+  'Hallo und willkommen beim Deutschlandatlas-Callcenter. Fragen Sie mich, wann immer Sie bereit sind.',
+  'Guten Tag — schön, dass Sie reinschauen. Tippen Sie Ihre Frage ein, ich höre zu.',
+  'Willkommen. Ich bin bereit — nennen Sie mir einfach einen Ort und eine Kennzahl.',
+  'Schön, dass Sie da sind. Fragen Sie mich gern etwas zu den Regionaldaten in Deutschland.',
+];
+let greetRot = 0;
+function greetingText() { return GREETINGS[(greetRot++) % GREETINGS.length]; }
 let introRot = 0;
 async function introBridge(context) {
   // Invariant I3: the bridge identity is decided by turnCount (how many turns were already
@@ -668,6 +681,12 @@ const server = createServer(async (req, res) => {
     // a "that's also an interesting question" opener, pre-synthesized so it can play the instant the
     // caller asks a NEW topic instead of the offered follow-up (client decides when to use it).
     const text = stripPronunciation(topicAckText());
+    let au = null; try { au = await ttsSpeak(text, 'primary'); } catch {}
+    return jsonRes(res, 200, { text, audioUrl: proxied(au) });
+  }
+  if (req.method === 'POST' && req.url === '/greeting') {
+    // #1: a short welcome, pre-synthesized so it plays instantly on the caller's first interaction.
+    const text = stripPronunciation(greetingText());
     let au = null; try { au = await ttsSpeak(text, 'primary'); } catch {}
     return jsonRes(res, 200, { text, audioUrl: proxied(au) });
   }
