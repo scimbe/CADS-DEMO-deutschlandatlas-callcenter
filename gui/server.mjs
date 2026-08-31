@@ -53,7 +53,27 @@ function trace(tag, obj) {
   try { console.log('[trace] ' + tag + ' ' + JSON.stringify(obj)); } catch {}
 }
 
-function runPipeline(query) {
+// Bound concurrent heavy child processes so a burst of requests can't thrash a small host. Real
+// incident: a backlog of speculative + live requests spawned 8 concurrent Piper procs and drove the
+// 2-vCPU host to load 200+, making everything appear to hang. A priority queue runs user-facing work
+// (real /answer) before background speculation. Caps are env-tunable per host size.
+function makeLimiter(max) {
+  let active = 0; const hi = [], lo = [];
+  const pump = () => {
+    if (active >= max) return;
+    const job = hi.shift() || lo.shift(); if (!job) return;
+    active++;
+    Promise.resolve().then(job.task).then(job.resolve, job.reject).finally(() => { active--; pump(); });
+  };
+  return (task, priority = false) => new Promise((resolve, reject) => { (priority ? hi : lo).push({ task, resolve, reject }); pump(); });
+}
+const piperLimit = makeLimiter(Number(process.env.CC_PIPER_CONCURRENCY) || 2);   // CPU-bound TTS
+const pipeLimit = makeLimiter(Number(process.env.CC_PIPELINE_CONCURRENCY) || 3);  // pipeline runtime spawns
+
+function runPipeline(query, priority = false) {
+  return pipeLimit(() => _runPipelineNow(query), priority);
+}
+function _runPipelineNow(query) {
   const t0 = Date.now();
   return new Promise((resolve) => {
     const p = spawn('node', [RUNTIME, '--query', query], { cwd: REPO_ROOT, env: process.env });
@@ -105,7 +125,9 @@ function pruneTtsDir(keep = 100) {
   } catch {}
 }
 function ttsLocalPiper(text) {
-  return new Promise((resolve) => {
+  // gated through piperLimit so at most CC_PIPER_CONCURRENCY Piper procs run at once (else a burst
+  // spawns dozens and thrashes a small host).
+  return piperLimit(() => new Promise((resolve) => {
     try { mkdirSync(TTS_DIR, { recursive: true }); } catch {}
     const id = process.pid + '-' + (ttsSeq++);
     const wav = join(TTS_DIR, id + '.wav');
@@ -117,7 +139,7 @@ function ttsLocalPiper(text) {
       p.on('close', (code) => { pruneTtsDir(); fin(code === 0 && existsSync(wav) ? '/tts/' + id + '.wav' : null); });
       p.on('error', () => fin(null));
     } catch { fin(null); }
-  });
+  }));
 }
 
 // The llm2 agent `audio_generation` channel. Resolves to an https clip URL, or null on any failure
@@ -332,7 +354,7 @@ function diskGet(q) {
 }
 function diskPut(q, obj) { try { mkdirSync(Q_CACHE, { recursive: true }); writeFileSync(join(Q_CACHE, qKey(q) + '.json'), JSON.stringify({ ...obj, ts: Date.now() })); } catch {} }
 
-function answerFor(query) {
+function answerFor(query, priority = false) {
   const key = (query || '').trim();
   if (!key) return Promise.resolve({ ok: false, answer: null, meta: null, audioUrl: null, err: 'empty' });
   if (specCache.has(key)) return specCache.get(key);
@@ -342,7 +364,7 @@ function answerFor(query) {
     if (cached && cached.answer && cached.meta) {           // reuse: same request ran before, data unchanged within TTL
       answer = cached.answer; meta = cached.meta; ok = true; reused = true;
     } else {
-      const r = await runPipeline(key);
+      const r = await runPipeline(key, priority);           // real /answer jumps the queue ahead of speculation
       const rawAnswer = r.final?.text || r.final?.answer || null;
       meta = r.final?.meta || null; ok = r.ok; err = r.ok ? null : (r.err || 'pipeline failed');
       answer = rawAnswer ? await narrate(rawAnswer, 'answer') : null;   // narrative style, number-guarded
@@ -702,12 +724,12 @@ const server = createServer(async (req, res) => {
   if (req.method === 'POST' && (req.url === '/answer' || req.url === '/ask')) {
     const query = ((await readBody(req)).query || '').toString().slice(0, 300);
     if (!query.trim()) return jsonRes(res, 400, { error: 'empty query' });
-    const r = await answerFor(query);
+    const r = await answerFor(query, true);   // user-facing -> priority over any background speculation
     trace('answer', { query, ok: r.ok, table: r.meta && r.meta.table, has_real_data: r.meta && r.meta.has_real_data, rows: r.meta && r.meta.live_rows_used, reused: r.reused, err: r.err });
     // warm follow-up candidates in the background so /followup can validate them from cache (some cities have no data)
     if (r.ok && r.meta && r.meta.table && r.meta.has_real_data !== false) {
       const place = placeFromQuery(query) || r.meta.place_name_requested || r.meta.place_resolved || '';
-      swapCityFollowups(query, place, 6).forEach((s) => { answerFor(s); });   // fire-and-forget speculation
+      swapCityFollowups(query, place, 3).forEach((s) => { answerFor(s, false); });   // fire-and-forget speculation (low priority, capped)
     }
     return jsonRes(res, r.ok ? 200 : 502, { query, ...r });
   }
