@@ -356,9 +356,11 @@
       const f=await (await fetch('/followup',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({query,answer})})).json();
       const sug=f.suggestions||[];
       if(sug.length){
+        // Follow-up is phrased as a yes-question (see deriveInvite); we offer "Ja" plus concrete
+        // alternatives, but deliberately NO "Nein" option — declining just means asking something new,
+        // which the input field always allows. (operator: der Nutzer soll nur mit "ja" antworten können.)
         const items=[
           {label:'✓ Ja',best:true,onClick:()=>deliver(sug[0],true)},
-          {label:'Nein, danke',onClick:()=>renderExamples()},
           ...sug.slice(1).map(s=>({label:s,onClick:()=>deliver(s,true)}))
         ];
         renderBubbles(items,'💬 '+(f.invite||'Möchten Sie noch etwas wissen?'));
