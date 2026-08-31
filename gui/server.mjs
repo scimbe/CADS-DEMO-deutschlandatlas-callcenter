@@ -128,10 +128,15 @@ function ttsChannel(text, voice = 'primary') {
       `CT_CHANNEL_FRONT_DOOR=bunsenbrenner.org:443 CT_CHANNEL_FRONT_DOOR_CERT="$CT_CHANNEL_FRONT_DOOR_CERT" CT_CHANNEL_FRONT_DOOR_ONLY=1 ` +
       `CT_CHANNEL_BROKER=bunsenbrenner.org:4435 CT_CHANNEL_RELAY=bunsenbrenner.org:4436 "$CT_AGENT_BIN" channel 2>/dev/null | tail -1`],
       { env: process.env });
-    let out = '';
+    let out = '', done = false;
+    const finish = (url) => { if (done) return; done = true; clearTimeout(timer); try { p.kill('SIGKILL'); } catch {} resolve(url); };
+    // A channel call must NEVER hang the whole answer: if the edge stalls (e.g. the grant is not yet a
+    // valid member -> [not-member], or the flaky tunnel), time out and resolve null so ttsSpeak falls
+    // back to local Piper. Without this, a stalled channel call left TTS silent ("höre nichts").
+    const timer = setTimeout(() => finish(null), Number(process.env.CC_CHANNEL_TIMEOUT_MS) || 8000);
     p.stdout.on('data', (d) => (out += d));
-    p.on('close', () => { const url = (out.trim().split('\n').pop() || '').trim(); resolve(/^https:\/\//.test(url) ? url : null); });
-    p.on('error', () => resolve(null));
+    p.on('close', () => { const url = (out.trim().split('\n').pop() || '').trim(); finish(/^https:\/\//.test(url) ? url : null); });
+    p.on('error', () => finish(null));
   });
 }
 
