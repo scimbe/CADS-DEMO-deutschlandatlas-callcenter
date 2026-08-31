@@ -130,6 +130,19 @@ const FILLER_PHRASES = [
   'Gleich habe ich das Ergebnis für Sie.',
   'Ich prüfe die passende Tabelle im Datensatz.',
 ];
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function synthOnce(f, text) {
+  return new Promise((res) => {
+    try {
+      const p = spawn(process.env.CC_PIPER_BIN, ['--model', process.env.CC_PIPER_MODEL, '--output_file', f], { env: process.env });
+      p.stdin.on('error', () => {}); p.stdin.end(text);
+      p.on('close', (code) => res(code === 0 && existsSync(f) && statSync(f).size > 0));
+      p.on('error', () => res(false));
+    } catch { res(false); }
+  });
+}
+
 async function ensureFillers() {
   if (!process.env.CC_PIPER_BIN || !process.env.CC_PIPER_MODEL) return;   // only the self-contained Piper deploy
   const dir = join(__dir, 'fillers');
@@ -138,13 +151,20 @@ async function ensureFillers() {
   for (let i = 0; i < FILLER_PHRASES.length; i++) {
     const f = join(dir, `filler${i + 1}.wav`);
     if (existsSync(f)) continue;
-    await new Promise((res) => {
-      try {
-        const p = spawn(process.env.CC_PIPER_BIN, ['--model', process.env.CC_PIPER_MODEL, '--output_file', f], { env: process.env });
-        p.stdin.on('error', () => {}); p.stdin.end(stripPronunciation(FILLER_PHRASES[i]));
-        p.on('close', () => { made++; res(); }); p.on('error', () => res());
-      } catch { res(); }
-    });
+    // Verify the child actually produced a non-empty file before counting it as done and
+    // moving on -- a transient Piper failure (seen live: a truncated 0-byte file, apparently
+    // from resource contention on this host's constrained cpuset after several back-to-back
+    // model loads, most often on the last phrase in the sequence) otherwise passes
+    // existsSync() forever after, permanently serving a broken/empty clip with no retry.
+    // Retry a few times with a short cooldown before giving up on a given phrase, and pause
+    // briefly between phrases so the previous invocation's threads/memory are fully released.
+    let ok = false;
+    for (let attempt = 0; attempt < 3 && !ok; attempt++) {
+      if (attempt > 0) await sleep(1500);
+      ok = await synthOnce(f, stripPronunciation(FILLER_PHRASES[i]));
+    }
+    if (ok) made++; else { try { unlinkSync(f); } catch {} }
+    await sleep(500);
   }
   if (made) console.log(`fillers: synthesized ${made} Thorsten wait-clip(s) via Piper`);
 }
