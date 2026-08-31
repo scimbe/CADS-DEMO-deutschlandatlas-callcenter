@@ -128,11 +128,19 @@ function ttsLocalPiper(text, priority = true) {
   // gated through piperLimit so at most CC_PIPER_CONCURRENCY Piper procs run at once (else a burst
   // spawns dozens and thrashes a small host). User-facing TTS is high-priority; background work
   // (filler regeneration, speculation) passes priority=false so a real answer never waits behind it.
+  const tQueued = Date.now();
   return piperLimit(() => new Promise((resolve) => {
+    const tStart = Date.now();
     try { mkdirSync(TTS_DIR, { recursive: true }); } catch {}
     const id = process.pid + '-' + (ttsSeq++);
     const wav = join(TTS_DIR, id + '.wav');
-    let done = false; const fin = (v) => { if (!done) { done = true; resolve(v); } };
+    let done = false;
+    const fin = (v) => { if (done) return; done = true;
+      // visibility into where a slow spoken clip goes: time spent WAITING for a Piper slot vs the
+      // actual synth time (services could see the total 100s gap but not whether it was queueing).
+      console.error(`[trace] piper-tts prio=${priority ? 'hi' : 'lo'} queued=${tStart - tQueued}ms synth=${Date.now() - tStart}ms chars=${(text || '').length} ok=${v != null}`);
+      resolve(v);
+    };
     try {
       const p = spawn(process.env.CC_PIPER_BIN, ['--model', process.env.CC_PIPER_MODEL, '--output_file', wav], { env: process.env });
       p.stdin.on('error', () => {});
