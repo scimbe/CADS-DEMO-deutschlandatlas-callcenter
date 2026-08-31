@@ -137,6 +137,7 @@
   <audio id="filler"></audio>
 
   <footer>
+    <div class="fl"><a class="support" href="https://scimbe.github.io/CADS-agent-marketplace-docs/how-to/install-and-customize-a-demo/" target="_blank" rel="noopener">Lokal installieren &amp; anpassen ↗</a></div>
     <div class="fl"><a class="support" href="https://steady.page/plans/77a32d9c-c399-4ca1-9515-7a628c7a9413" target="_blank" rel="noopener">Als Mitglied unterstützen →</a><a class="support" href="https://buymeacoffee.com/bunsenbrenner" target="_blank" rel="noopener">Buy me a coffee →</a><a href="https://github.com/scimbe/CADS-Tunnel" target="_blank" rel="noopener">GitHub</a><a href="https://bunsenbrenner.org/legal-notice" target="_blank" rel="noopener">Legal Notice</a><a href="https://bunsenbrenner.org/privacy-policy" target="_blank" rel="noopener">Privacy Policy</a><a href="https://bunsenbrenner.org/terms-of-use" target="_blank" rel="noopener">Terms of Use</a></div>
     <span>Antworten aus der Live-Deutschlandatlas-API · nichts erfunden · <a href="https://bunsenbrenner.org" target="_blank" rel="noopener">bunsenbrenner.org</a></span>
   </footer>
@@ -272,6 +273,14 @@
   async function prepareNextIntro(){ nextIntro=await fetchIntro(); }   // prefetch so P1 can play instantly
   prepareNextIntro();   // turn-0 service intro, ready before the first request
 
+  // #5: when the caller asks a NEW topic instead of the offered follow-up, open with a warm "that's
+  // also an interesting question" ack — pre-synthesized in parallel so it plays instantly in place of
+  // the usual bridge. followupActive tracks whether a follow-up is currently on offer.
+  let followupActive=false, nextTopicAck=null;
+  function fetchTopicAck(){ return fetch('/topicack',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({})}).then(r=>r.json()).catch(()=>null); }
+  async function prepareTopicAck(){ nextTopicAck=await fetchTopicAck(); }
+  prepareTopicAck();
+
   // start-of-turn bridge (P1): ALWAYS reserve the slot first (keeps the P1..P5 order intact), then fill
   // it the instant the clip is ready — from the prefetch if present, otherwise fetched now. It never
   // leaves P1 empty and never races the previous turn's prepareNextIntro(). Presenting a bridge advances
@@ -288,8 +297,12 @@
   // phase 1 - understand & guide (targeted clarifying question; speculation starts server-side)
   async function ask(){
     const query=q.value.trim(); if(!query) return; unlockAudio();
+    const pivot=followupActive; followupActive=false;   // typed a new question while a follow-up was on offer
     go.disabled=true; q.disabled=true; reset(); newTurn();
-    startBridge();                         // Ueberbruecken plays right away -> no dead air during understand
+    // #5: on a topic pivot, open with the pre-synthesized "also an interesting question" ack instead of
+    // the usual bridge (both fill the wait during understand; the ack additionally acknowledges the switch).
+    if(pivot && nextTopicAck && nextTopicAck.audioUrl){ const s=slot(); fill(s, nextTopicAck.audioUrl); nextTopicAck=null; turnCount++; prepareTopicAck(); }
+    else startBridge();                    // Ueberbruecken plays right away -> no dead air during understand
     const ctxP=fetchContext(query);        // speculative: Verstehen + Fun-Fact compute in parallel with /understand
     qEcho.innerHTML='<span>Ihre Frage:</span> <b></b>'; qEcho.querySelector('b').textContent=query;
     setState('listen'); aEl.className='a working'; aEl.textContent='Ich verstehe Ihre Frage …';
@@ -314,7 +327,7 @@
   // phase 2 - deliver: Ueberbruecken (already playing) -> Verstehen -> Wussten Sie schon -> Antwort, all in order
   async function deliver(query, isFollowup, opts){
     opts=opts||{};
-    unlockAudio(); pending=null;
+    unlockAudio(); pending=null; followupActive=false;   // a delivered/clicked answer is not a topic pivot
     go.disabled=true; q.disabled=true;
     if(!opts.continued){ reset(); newTurn(); startBridge(); }   // fresh turn (bubble click): bridge plays immediately
     qEcho.innerHTML='<span>'+(isFollowup?'Weiter gefragt:':'Frage:')+'</span> <b></b>'; qEcho.querySelector('b').textContent=query;
@@ -347,7 +360,7 @@
       const sI=slot();
       doFollowup(query, ans).then(u=>fill(sI, u));
     }catch(e){stopWait();aEl.className='a';aEl.textContent='Verbindungsfehler: '+e.message;setState('done');go.disabled=false;q.disabled=false;fill(sV,null);fill(sF,null);fill(sA,null);}
-    finally{ prepareNextIntro(); }   // I5: refresh the next bridge on EVERY path (success or failure)
+    finally{ prepareNextIntro(); prepareTopicAck(); }   // I5: refresh next bridge + new-topic ack on EVERY path
   }
 
   // follow-up: render bubbles + RETURN the spoken invite url (queued as part 5)
@@ -364,7 +377,8 @@
           ...sug.slice(1).map(s=>({label:s,onClick:()=>deliver(s,true)}))
         ];
         renderBubbles(items,'💬 '+(f.invite||'Möchten Sie noch etwas wissen?'));
-      } else renderExamples();
+        followupActive=true;   // a follow-up is now on offer -> a typed NEW question triggers the topic-ack
+      } else { renderExamples(); followupActive=false; }
       return f.inviteAudioUrl||null;
     }catch(e){ return null; }
   }
