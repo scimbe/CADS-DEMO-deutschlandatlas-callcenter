@@ -179,7 +179,7 @@
   const STATUS=['Ich habe Ihre Frage verstanden …','Ich suche die passende Deutschlandatlas-Tabelle …','Ich frage die Live-Daten bei der amtlichen Quelle ab …','Ich prüfe die Werte und formuliere Ihre Antwort …'];
   let statusTimer=null,tickTimer=null,t0=0;
   function startWait(){let i=0;aEl.className='a working';aEl.textContent=STATUS[0];
-    statusTimer=setInterval(()=>{i=(i+1)%STATUS.length;aEl.textContent=STATUS[i];},2600);
+    statusTimer=setInterval(()=>{ if(i<STATUS.length-1){ i++; aEl.textContent=STATUS[i]; } else { clearInterval(statusTimer); } },2600);   // advance through the phases ONCE, then hold on the last (no looping)
     t0=performance.now();timerEl.style.display='block';
     tickTimer=setInterval(()=>{timerEl.textContent=((performance.now()-t0)/1000).toFixed(1).replace('.',',')+' s';},100);}
   function stopWait(){clearInterval(statusTimer);clearInterval(tickTimer);timerEl.style.display='none';}
@@ -253,24 +253,30 @@
   }
   prepareNextIntro();   // first-turn service intro, ready before the first request
 
+  // start-of-turn bridge: the pre-prepared "Ueberbruecken" clip plays IMMEDIATELY (within the click),
+  // filling the wait from second 1 while understand + context compute. Fired speculatively too.
+  function startBridge(){ if(nextIntro && nextIntro.audioUrl){ const s=slot(); fill(s, nextIntro.audioUrl); } }
+  function fetchContext(query){ return fetch('/context',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({query})}).then(r=>r.json()).catch(()=>null); }
+
   // phase 1 - understand & guide (targeted clarifying question; speculation starts server-side)
   async function ask(){
     const query=q.value.trim(); if(!query) return; unlockAudio();
     go.disabled=true; q.disabled=true; reset(); newTurn();
+    startBridge();                         // Ueberbruecken plays right away -> no dead air during understand
+    const ctxP=fetchContext(query);        // speculative: Verstehen + Fun-Fact compute in parallel with /understand
     qEcho.innerHTML='<span>Ihre Frage:</span> <b></b>'; qEcho.querySelector('b').textContent=query;
     setState('listen'); aEl.className='a working'; aEl.textContent='Ich verstehe Ihre Frage …';
     setTimeout(()=>setState('think'),500);
     try{
-      const sentPending=pending;   // this turn is answered against the clarify we asked last turn (if any)
+      const sentPending=pending;
       const u=await (await fetch('/understand',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({query,context:{history,lastQuery,lastAnswer,pending:sentPending,slots:slotsDS}})})).json();
       go.disabled=false; q.disabled=false;
-      if(u.slots) slotsDS={ort:u.slots.ort||slotsDS.ort, indikator:u.slots.indikator||slotsDS.indikator};   // merge dialogue-state slots
-      if(u.precise){ pending=null; deliver(u.best_guess, u.kind==='anschluss'||u.kind==='klarstellung'); return; }
-      // not precise -> remember what we asked, so the NEXT turn is treated as the answer to THIS question
+      if(u.slots) slotsDS={ort:u.slots.ort||slotsDS.ort, indikator:u.slots.indikator||slotsDS.indikator};
+      if(u.precise){ pending=null; deliver(u.best_guess, u.kind==='anschluss'||u.kind==='klarstellung', {continued:true, ctxP:(u.best_guess===query?ctxP:null)}); return; }
       pending={clarify:u.clarify||'', best_guess:u.best_guess||'', options:u.options||[], original:query};
       setState('idle');
       aEl.className='a'; aEl.textContent=u.clarify||'Können Sie Ihre Frage etwas genauer stellen?';
-      if(u.clarifyAudioUrl){ const s=slot(); fill(s,u.clarifyAudioUrl); }   // speak the clarify through the same queue
+      if(u.clarifyAudioUrl){ const s=slot(); fill(s,u.clarifyAudioUrl); }
       const items=[]; if(u.best_guess) items.push({label:u.best_guess,best:true,onClick:()=>deliver(u.best_guess,false)});
       (u.options||[]).forEach(o=>{ if(o&&o!==u.best_guess) items.push({label:o,onClick:()=>deliver(o,false)}); });
       renderBubbles(items,'<span class="spin"></span>Wahrscheinlichste Antwort wird bereits vorbereitet …');
@@ -278,17 +284,20 @@
     }catch(e){go.disabled=false;q.disabled=false;stopWait();aEl.className='a';aEl.textContent='Verbindungsfehler: '+e.message;setState('done');}
   }
 
-  // phase 2 - deliver: four ordered spoken parts (Verstehen -> Ueberbruecken -> Wussten Sie schon -> Antwort)
-  async function deliver(query, isFollowup){
-    unlockAudio(); pending=null;   // a delivered answer supersedes any open clarification
-    go.disabled=true; q.disabled=true; reset(); newTurn();
+  // phase 2 - deliver: Ueberbruecken (already playing) -> Verstehen -> Wussten Sie schon -> Antwort, all in order
+  async function deliver(query, isFollowup, opts){
+    opts=opts||{};
+    unlockAudio(); pending=null;
+    go.disabled=true; q.disabled=true;
+    if(!opts.continued){ reset(); newTurn(); startBridge(); }   // fresh turn (bubble click): bridge plays immediately
     qEcho.innerHTML='<span>'+(isFollowup?'Weiter gefragt:':'Frage:')+'</span> <b></b>'; qEcho.querySelector('b').textContent=query;
     aEl.className='a working'; aEl.textContent='Ich hole die Antwort …'; setState('query'); startWait();
-    const sV=slot(), sB=slot(), sF=slot(), sA=slot();          // 1 Verstehen - 2 Ueberbruecken - 3 Wussten Sie schon - 4 Antwort
-    fill(sB, (nextIntro&&nextIntro.audioUrl)?nextIntro.audioUrl:null);   // part 2 is pre-prepared -> ready immediately
-    fetch('/context',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({query})}).then(r=>r.json()).then(c=>{
-      fill(sV, (c&&c.verstehen)?c.verstehen.audioUrl:null);            // part 1
-      if(c&&c.funfact&&c.funfact.text){ showFunfact(c.funfact); fill(sF, speakFunfact()?c.funfact.audioUrl:null); }   // part 3 (shown always; spoken per toggle)
+    const sV=slot(), sF=slot(), sA=slot();      // Verstehen, Wussten Sie schon, Antwort (Ueberbruecken already queued)
+    const ctxP=opts.ctxP||fetchContext(query);
+    ctxP.then(c=>{
+      if(!c){ fill(sV,null); fill(sF,null); return; }
+      fill(sV, (c.verstehen)?c.verstehen.audioUrl:null);
+      if(c.funfact&&c.funfact.text){ showFunfact(c.funfact); fill(sF, speakFunfact()?c.funfact.audioUrl:null); }
       else fill(sF,null);
     }).catch(()=>{ fill(sV,null); fill(sF,null); });
     try{
@@ -303,15 +312,15 @@
             srcTxt.innerHTML='<span class="pill">'+(m.table||'—')+'</span> <span class="pill">'+(m.place_resolved||m.place_name_requested||'')+'</span> <span class="pill">'+(m.live_rows_used||0)+' Live-Zeile(n)</span>';}
         }
       });
-      fill(sA, d.audioUrl);                                    // part 4 - plays AFTER parts 1-2-3 have finished (no interruption)
+      fill(sA, d.audioUrl);
       lastQuery=query; lastAnswer=ans;
       history.push({q:query, place:(d.meta&&(d.meta.place_resolved||d.meta.place_name_requested))||null, answer:ans});
-      if(history.length>6) history.shift();   // keep a short rolling memory
+      if(history.length>6) history.shift();
       go.disabled=false; q.disabled=false;
-      const sI=slot();                                          // part 5 - spoken follow-up invite (after the answer)
+      const sI=slot();
       doFollowup(query, ans).then(u=>fill(sI, u));
-      prepareNextIntro();                                       // bridge for the NEXT turn, referencing this interaction
-    }catch(e){stopWait();aEl.className='a';aEl.textContent='Verbindungsfehler: '+e.message;setState('done');go.disabled=false;q.disabled=false;fill(sA,null);}
+      prepareNextIntro();
+    }catch(e){stopWait();aEl.className='a';aEl.textContent='Verbindungsfehler: '+e.message;setState('done');go.disabled=false;q.disabled=false;fill(sV,null);fill(sF,null);fill(sA,null);}
   }
 
   // follow-up: render bubbles + RETURN the spoken invite url (queued as part 5)
