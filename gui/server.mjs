@@ -20,6 +20,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, unlink
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
+import FSM_SPEC, { bridgeKind, describe as describeFsm } from './dialog-fsm.mjs';
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dir, '..');
@@ -350,33 +351,64 @@ const SERVICE_INTROS = [
   'Hier spricht das Deutschlandatlas-Callcenter. Ich hole für Sie echte Regionaldaten aus dem Deutschlandatlas — nichts erfunden, alles direkt aus der Quelle.',
   'Guten Tag, willkommen beim Sprach-Callcenter zum Deutschlandatlas. Stellen Sie mir Ihre Frage zu einem Ort in Deutschland, ich sehe für Sie in den echten Daten nach.',
 ];
+const BRIDGE_FALLBACKS = ['Kommen wir zu Ihrer nächsten Frage.', 'Gerne sehe ich für Sie weiter nach.', 'Bleiben wir gleich dran — einen Moment, ich schaue nach.'];
 let introRot = 0;
 async function introBridge(context) {
+  // Invariant I3: the bridge identity is decided by turnCount (how many turns were already
+  // delivered this session), NOT by whether the last answer succeeded. turnCount 0 -> introduce
+  // the service; every later turn -> a context bridge that references the previous interaction to
+  // buy time until the Atlas answer is ready. The client passes turnCount; lastQuery is only the
+  // *content* for the bridge, never the switch (that was the "service intro repeats" bug).
+  const turnCount = Number((context && context.turnCount) || 0);
   const last = context && context.lastQuery;
   let text;
-  if (last) {
-    const u = await llmJSON(
-      'Formuliere EINEN sehr kurzen, freundlichen deutschen Überleitungssatz für ein Callcenter, der lose an die zuletzt beantwortete Frage anknüpft und zur nächsten überleitet. Variiere die Formulierung, kein Aussprache-Hinweis. Antworte NUR als striktes JSON: {"text": "..."}',
-      'Zuletzt beantwortet: ' + String(last).slice(0, 200));
-    text = (u && typeof u.text === 'string' && u.text.trim()) ? u.text.trim() : 'Kommen wir zu Ihrer nächsten Frage.';
+  if (bridgeKind(turnCount) === 'context_bridge') {
+    if (last) {
+      const u = await llmJSON(
+        'Formuliere EINEN sehr kurzen, freundlichen deutschen Überleitungssatz für ein Callcenter, der lose an die zuletzt beantwortete Frage anknüpft und zur nächsten überleitet. Variiere die Formulierung, kein Aussprache-Hinweis. Antworte NUR als striktes JSON: {"text": "..."}',
+        'Zuletzt beantwortet: ' + String(last).slice(0, 200));
+      text = (u && typeof u.text === 'string' && u.text.trim()) ? u.text.trim() : 'Kommen wir zu Ihrer nächsten Frage.';
+    } else {
+      // later turn but no carried content (e.g. the previous answer failed) -> a neutral bridge,
+      // still NOT the service intro. Keeps I5 intact.
+      text = BRIDGE_FALLBACKS[(introRot++) % BRIDGE_FALLBACKS.length];
+    }
   } else {
     text = SERVICE_INTROS[(introRot++) % SERVICE_INTROS.length];
   }
   return stripPronunciation(text);
 }
 
+const _sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function llmJSON(system, user) {
   const base = (process.env.LITELLM_BASE_URL || '').replace(/\/$/, '');
   const key = process.env.LITELLM_API_KEY, model = process.env.LITELLM_DEFAULT_MODEL || 'local-devstral-small2';
-  try {
-    const resp = await fetch(base + '/chat/completions', {
-      method: 'POST', headers: { authorization: 'Bearer ' + key, 'content-type': 'application/json' },
-      body: JSON.stringify({ model, temperature: 0, max_tokens: 400, response_format: { type: 'json_object' },
-        messages: [{ role: 'system', content: system }, { role: 'user', content: user }] }),
-    });
-    const j = await resp.json();
-    return JSON.parse(j.choices?.[0]?.message?.content || '{}');
-  } catch { return {}; }
+  // The litellm call is tunnelled over a flaky edge (peer resets mid-request -> ECONNRESET); a single
+  // reset otherwise silently degrades understand/bridge/narrate to an empty object. Retry transient
+  // network/5xx errors a few times with a short backoff before giving up (request is idempotent, temp 0).
+  const RETRIES = 3;
+  for (let attempt = 1; attempt <= RETRIES; attempt++) {
+    try {
+      const resp = await fetch(base + '/chat/completions', {
+        method: 'POST', headers: { authorization: 'Bearer ' + key, 'content-type': 'application/json' },
+        body: JSON.stringify({ model, temperature: 0, max_tokens: 400, response_format: { type: 'json_object' },
+          messages: [{ role: 'system', content: system }, { role: 'user', content: user }] }),
+      });
+      if (!resp.ok) {
+        if (resp.status >= 500 && attempt < RETRIES) { await _sleep(300 * attempt); continue; }
+        return {};
+      }
+      const j = await resp.json();
+      return JSON.parse(j.choices?.[0]?.message?.content || '{}');
+    } catch (e) {
+      const msg = String((e && e.cause && e.cause.code) || (e && e.message) || e);
+      if (/ECONNRESET|ETIMEDOUT|ECONNREFUSED|EPIPE|fetch failed|socket hang up|network/i.test(msg) && attempt < RETRIES) {
+        await _sleep(300 * attempt); continue;
+      }
+      return {};
+    }
+  }
+  return {};
 }
 
 // Rephrase into a more narrative / spoken German style WITHOUT changing facts.
@@ -662,6 +694,12 @@ const server = createServer(async (req, res) => {
     }).join('\n');
     res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
     res.end(pretty || '(no trace yet — make a request first)');
+    return;
+  }
+  if (req.method === 'GET' && req.url.startsWith('/fsm')) {
+    // read-only view of the canonical dialog state machine (design single source of truth)
+    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+    res.end(JSON.stringify(describeFsm(), null, 2));
     return;
   }
   res.writeHead(404); res.end('not found');
