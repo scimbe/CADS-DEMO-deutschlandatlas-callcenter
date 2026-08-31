@@ -50,16 +50,22 @@ export const KIND = { NEU: 'neu', ANSCHLUSS: 'anschluss', KLARSTELLUNG: 'klarste
  * Each state: { pre, enter, leave, on } where `on` maps an event to the next state.
  */
 export const FSM = {
-  initial: 'IDLE',
+  initial: 'GREETING',
   states: {
+    GREETING: {
+      pre: 'prefetch a short spoken greeting (/greeting) AND the turn-0 bridge (/intro) up front',
+      enter: 'browsers block autoplay on bare load, so on the caller\'s FIRST gesture (click/tap, not the ask button) play the greeting and fade the welcome hint',
+      leave: 'mark greeted; a submitted question also counts as greeted (the turn-0 intro is then the opener)',
+      on: { greeted: 'IDLE', utterance: 'CLASSIFY' },
+    },
     IDLE: {
-      pre: 'prepare the next BRIDGE (service intro on turn 0, else a context bridge) so it can play instantly',
+      pre: 'prepare, ready-to-play: the next BRIDGE (/intro) AND a "new topic" ack (/topicack)',
       enter: 'await caller utterance',
       leave: 'none',
       on: { utterance: 'CLASSIFY' },
     },
     CLASSIFY: {
-      pre: 'carry {history, lastQuery, lastAnswer, pending, slots} into the request',
+      pre: 'carry {history, lastQuery, lastAnswer, pending, slots, followupActive} into the request',
       enter: 'POST /understand → { precise, kind∈{neu,anschluss,klarstellung}, slots, clarify, best_guess }',
       leave: 'merge dialogue-state slots',
       on: { precise: 'DELIVER', ambiguous: 'CLARIFY' },
@@ -73,21 +79,30 @@ export const FSM = {
     DELIVER: {
       pre: 'speculatively, IN PARALLEL: POST /context (Verstehen + Wikipedia fun fact) and POST /answer (pipeline, retry-guarded)',
       enter: 'queue the five ordered parts P1..P5 and play them strictly in order, each finishing before the next',
-      leave: 'commit {lastQuery, lastAnswer, slots, history}; turnCount++; ALWAYS prepare the next BRIDGE',
+      leave: 'commit {lastQuery, lastAnswer, slots, history}; turnCount++; ALWAYS prepare the next BRIDGE and topic-ack',
       on: { done: 'IDLE' },
       parts: PARTS,
+      // P1 BRIDGE has three variants, chosen deterministically at turn start:
+      //   turn 0        -> a service intro that ALSO conveys one helpful Bunsenbrenner fact (#2)
+      //   topic pivot   -> a "that is also an interesting question" ack, when the caller typed a NEW
+      //                    topic instead of the offered follow-up (#5); pre-synthesized, plays instantly
+      //   otherwise     -> a context bridge that references the previous interaction
+      // P5 WEITERFUEHRUNG offers only "Ja" + concrete alternatives, never a "Nein" (#4).
     },
   },
 };
 
-/** Hard invariants the implementation must uphold (asserted by verify below). */
+/** Hard invariants the implementation must uphold. */
 export const INVARIANTS = [
   'I1 ordered/non-interruptible: P1..P5 always play in queue order, each to the end',
   'I2 bridge-first: P1 (BRIDGE) enters immediately on utterance, before /understand resolves',
-  'I3 bridge identity keyed on turnCount: service intro iff turnCount===0, else a context bridge — NEVER keyed on last-answer success',
+  'I3 bridge identity is deterministic at turn start: turn 0 -> service intro + Bunsenbrenner fact; topic pivot -> topic-ack; else context bridge — NEVER keyed on last-answer success',
   'I4 fun fact always present as P3 (always shown; spoken per toggle; Wikipedia-sourced, LLM-independent)',
-  'I5 the next BRIDGE is prepared in EVERY leave (success AND failure), so it can never regress to the service intro',
-  'I6 the Atlas answer is robust to transient proxy resets (ECONNRESET/5xx retry)',
+  'I5 the next BRIDGE and topic-ack are prepared in EVERY leave (success AND failure), so nothing can regress to the intro',
+  'I6 the Atlas answer + all LLM calls retry transient proxy resets (ECONNRESET/5xx)',
+  'I7 greeting plays on the FIRST caller gesture (autoplay policy), pre-synthesized, distinct from the turn-0 intro so they never repeat',
+  'I8 topic pivot: a NEW topic asked instead of the offered follow-up opens with the pre-synthesized "also interesting" ack in place of the bridge',
+  'I9 the follow-up (P5) offers only "Ja" + alternatives, never a "Nein" — declining means asking something new',
 ];
 
 /**
