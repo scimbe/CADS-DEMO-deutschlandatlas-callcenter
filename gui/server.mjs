@@ -116,25 +116,15 @@ function ttsLocalPiper(text) {
   });
 }
 
-function ttsSpeak(text, voice = 'primary') {
-  text = stripPronunciation(text);
-  if (process.env.CC_TTS !== '1') return Promise.resolve(null);
-  // Production TTS is the llm2/labor agent `audio_generation` channel (operator directive: the voice
-  // is offered THROUGH the agent channel, not a bundled engine). It takes precedence whenever its
-  // env is configured. Local Piper stays ONLY as an explicit offline fallback for a deploy that
-  // provides no channel env at all.
-  const CT = process.env.CT_AGENT_BIN, RELAY = process.env.CT_RELAY_ENV, CH = process.env.CT_AUDIO_CHANNEL_ID;
-  const channelReady = CT && RELAY && CH;
-  if (!channelReady) {
-    if (process.env.CC_PIPER_BIN && process.env.CC_PIPER_MODEL) return ttsLocalPiper(text);   // offline fallback only
-    return Promise.resolve(null);
-  }
+// The llm2 agent `audio_generation` channel. Resolves to an https clip URL, or null on any failure
+// (spawn error, non-URL output) so the caller can fall back.
+function ttsChannel(text, voice = 'primary') {
   return new Promise((resolve) => {
     const payload = JSON.stringify({ text, voice });
     const p = spawn('bash', ['-c',
       `set -a; source "$CT_RELAY_ENV"; set +a; printf '%s' '${payload.replace(/'/g, "'\\''")}' | ` +
       `CT_CHANNEL_ROLE=initiate CT_CHANNEL_CALL_SERVICE=audio_generation CT_CHANNEL_CALL_PERSISTENT=0 CT_CHANNEL_RELAY_ONLY=1 ` +
-      `CT_CHANNEL_ID="${CH}" CT_CHANNEL_GRANT="$CT_CHANNEL_GRANT_2E" CT_CHANNEL_HOLDER_KEY="$CT_CHANNEL_HOLDER_KEY" CT_CHANNEL_NOISE_KEY="$CT_CHANNEL_NOISE_KEY" ` +
+      `CT_CHANNEL_ID="${process.env.CT_AUDIO_CHANNEL_ID}" CT_CHANNEL_GRANT="$CT_CHANNEL_GRANT_2E" CT_CHANNEL_HOLDER_KEY="$CT_CHANNEL_HOLDER_KEY" CT_CHANNEL_NOISE_KEY="$CT_CHANNEL_NOISE_KEY" ` +
       `CT_CHANNEL_FRONT_DOOR=bunsenbrenner.org:443 CT_CHANNEL_FRONT_DOOR_CERT="$CT_CHANNEL_FRONT_DOOR_CERT" CT_CHANNEL_FRONT_DOOR_ONLY=1 ` +
       `CT_CHANNEL_BROKER=bunsenbrenner.org:4435 CT_CHANNEL_RELAY=bunsenbrenner.org:4436 "$CT_AGENT_BIN" channel 2>/dev/null | tail -1`],
       { env: process.env });
@@ -143,6 +133,24 @@ function ttsSpeak(text, voice = 'primary') {
     p.on('close', () => { const url = (out.trim().split('\n').pop() || '').trim(); resolve(/^https:\/\//.test(url) ? url : null); });
     p.on('error', () => resolve(null));
   });
+}
+
+function ttsSpeak(text, voice = 'primary') {
+  text = stripPronunciation(text);
+  if (process.env.CC_TTS !== '1') return Promise.resolve(null);
+  // Production voice = the llm2 agent `audio_generation` channel (operator directive), CHANNEL-FIRST.
+  // Local Piper, when configured, is an automatic RUNTIME fallback: if the channel call fails at
+  // request time (host can't reach it, spawn error, non-URL output), we synthesize with Piper instead
+  // so a delivered turn is never silent. With no channel env, Piper is used directly; with neither,
+  // TTS is a no-op. (Operator choice: "Channel + Piper-Fallback — nutzt den Channel wenn erreichbar,
+  // verstummt nie".)
+  const channelReady = process.env.CT_AGENT_BIN && process.env.CT_RELAY_ENV && process.env.CT_AUDIO_CHANNEL_ID;
+  const piperReady = process.env.CC_PIPER_BIN && process.env.CC_PIPER_MODEL;
+  if (channelReady) {
+    return ttsChannel(text, voice).then((url) => (url || (piperReady ? ttsLocalPiper(text) : null)));
+  }
+  if (piperReady) return ttsLocalPiper(text);
+  return Promise.resolve(null);
 }
 const proxied = (u) => (u ? (u.startsWith('/') ? u : '/audio?u=' + encodeURIComponent(u)) : null);
 
