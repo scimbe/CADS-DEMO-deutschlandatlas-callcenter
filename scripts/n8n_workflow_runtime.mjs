@@ -163,7 +163,7 @@ async function llmChat({ system, user, temperature, max_tokens, json_object }) {
     } catch (e) {
       lastErr = e;
       const msg = String((e && e.cause && e.cause.code) || (e && e.message) || e);
-      const transient = /ECONNRESET|ETIMEDOUT|ECONNREFUSED|EPIPE|fetch failed|socket hang up|network/i.test(msg);
+      const transient = /ECONNRESET|ETIMEDOUT|ECONNREFUSED|EPIPE|UND_ERR|fetch failed|socket|network|terminated|other side closed/i.test(msg);
       if (transient && attempt < RETRIES) {
         trace("LLM connection error (retrying)", msg, `attempt ${attempt}/${RETRIES}`);
         await sleep(300 * attempt);

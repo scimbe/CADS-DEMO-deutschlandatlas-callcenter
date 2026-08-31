@@ -484,7 +484,7 @@ async function llmJSON(system, user) {
       return JSON.parse(j.choices?.[0]?.message?.content || '{}');
     } catch (e) {
       const msg = String((e && e.cause && e.cause.code) || (e && e.message) || e);
-      if (/ECONNRESET|ETIMEDOUT|ECONNREFUSED|EPIPE|fetch failed|socket hang up|network/i.test(msg) && attempt < RETRIES) {
+      if (/ECONNRESET|ETIMEDOUT|ECONNREFUSED|EPIPE|UND_ERR|fetch failed|socket|network|terminated|other side closed/i.test(msg) && attempt < RETRIES) {
         await _sleep(300 * attempt); continue;
       }
       return {};
