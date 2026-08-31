@@ -124,9 +124,10 @@ function pruneTtsDir(keep = 100) {
     for (const { f } of files.slice(keep)) { try { unlinkSync(join(TTS_DIR, f)); } catch {} }
   } catch {}
 }
-function ttsLocalPiper(text) {
+function ttsLocalPiper(text, priority = true) {
   // gated through piperLimit so at most CC_PIPER_CONCURRENCY Piper procs run at once (else a burst
-  // spawns dozens and thrashes a small host).
+  // spawns dozens and thrashes a small host). User-facing TTS is high-priority; background work
+  // (filler regeneration, speculation) passes priority=false so a real answer never waits behind it.
   return piperLimit(() => new Promise((resolve) => {
     try { mkdirSync(TTS_DIR, { recursive: true }); } catch {}
     const id = process.pid + '-' + (ttsSeq++);
@@ -139,7 +140,7 @@ function ttsLocalPiper(text) {
       p.on('close', (code) => { pruneTtsDir(); fin(code === 0 && existsSync(wav) ? '/tts/' + id + '.wav' : null); });
       p.on('error', () => fin(null));
     } catch { fin(null); }
-  }));
+  }), priority);
 }
 
 // The llm2 agent `audio_generation` channel. Resolves to an https clip URL, or null on any failure
@@ -166,7 +167,7 @@ function ttsChannel(text, voice = 'primary') {
   });
 }
 
-function ttsSpeak(text, voice = 'primary') {
+function ttsSpeak(text, voice = 'primary', priority = true) {
   text = stripPronunciation(text);
   if (process.env.CC_TTS !== '1') return Promise.resolve(null);
   // Production voice = the llm2 agent `audio_generation` channel (operator directive), CHANNEL-FIRST.
@@ -178,9 +179,9 @@ function ttsSpeak(text, voice = 'primary') {
   const channelReady = process.env.CT_AGENT_BIN && process.env.CT_RELAY_ENV && process.env.CT_AUDIO_CHANNEL_ID;
   const piperReady = process.env.CC_PIPER_BIN && process.env.CC_PIPER_MODEL;
   if (channelReady) {
-    return ttsChannel(text, voice).then((url) => (url || (piperReady ? ttsLocalPiper(text) : null)));
+    return ttsChannel(text, voice).then((url) => (url || (piperReady ? ttsLocalPiper(text, priority) : null)));
   }
-  if (piperReady) return ttsLocalPiper(text);
+  if (piperReady) return ttsLocalPiper(text, priority);
   return Promise.resolve(null);
 }
 const proxied = (u) => (u ? (u.startsWith('/') ? u : '/audio?u=' + encodeURIComponent(u)) : null);
@@ -199,14 +200,17 @@ const FILLER_PHRASES = [
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function synthOnce(f, text) {
-  return new Promise((res) => {
+  // Filler regeneration is background work: gate it through piperLimit at LOW priority so it never
+  // occupies a Piper slot ahead of a real user-facing clip (a boot-time filler resynth otherwise held
+  // the cores and delayed the first real audio to ~150s on the small host).
+  return piperLimit(() => new Promise((res) => {
     try {
       const p = spawn(process.env.CC_PIPER_BIN, ['--model', process.env.CC_PIPER_MODEL, '--output_file', f], { env: process.env });
       p.stdin.on('error', () => {}); p.stdin.end(text);
       p.on('close', (code) => res(code === 0 && existsSync(f) && statSync(f).size > 0));
       p.on('error', () => res(false));
     } catch { res(false); }
-  });
+  }), false);
 }
 
 async function ensureFillers() {
@@ -370,7 +374,7 @@ function answerFor(query, priority = false) {
       answer = rawAnswer ? await narrate(rawAnswer, 'answer') : null;   // narrative style, number-guarded
       if (ok && answer && meta && meta.table && meta.has_real_data !== false) diskPut(key, { answer, meta });
     }
-    let au = null; if (answer) { try { au = await ttsSpeak(answer, 'primary'); } catch {} }
+    let au = null; if (answer) { try { au = await ttsSpeak(answer, 'primary', priority); } catch {} }
     return { ok, answer, meta, audioUrl: proxied(au), reused, err };
   })();
   specCache.set(key, promise);
