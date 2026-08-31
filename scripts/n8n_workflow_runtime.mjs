@@ -95,6 +95,8 @@ async function esriGet(url, params) {
   return resp.json();
 }
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 async function llmChat({ system, user, temperature, max_tokens, json_object }) {
   const base = process.env.LITELLM_BASE_URL;
   const key = process.env.LITELLM_API_KEY;
@@ -114,16 +116,42 @@ async function llmChat({ system, user, temperature, max_tokens, json_object }) {
   };
   if (json_object) body.response_format = { type: "json_object" };
   trace("POST", url, `model=${model} temp=${temperature}`);
-  const resp = await fetch(url, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  const json = await resp.json();
-  if (!resp.ok) {
-    trace("LLM HTTP error", resp.status, JSON.stringify(json).slice(0, 500));
+  // The litellm proxy occasionally resets the TLS connection mid-request (ECONNRESET) or
+  // returns a transient 5xx. A single reset otherwise fails the whole answer, so retry a few
+  // times with a short backoff before giving up (idempotent request; safe to repeat).
+  const RETRIES = 3;
+  let lastErr = null;
+  for (let attempt = 1; attempt <= RETRIES; attempt++) {
+    try {
+      const resp = await fetch(url, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!resp.ok) {
+        const text = await resp.text();
+        if (resp.status >= 500 && attempt < RETRIES) {
+          trace("LLM HTTP error (retrying)", resp.status, `attempt ${attempt}/${RETRIES}`);
+          await sleep(300 * attempt);
+          continue;
+        }
+        trace("LLM HTTP error", resp.status, text.slice(0, 500));
+        try { return JSON.parse(text); } catch { throw new Error(`LLM HTTP ${resp.status}: ${text.slice(0, 200)}`); }
+      }
+      return await resp.json();
+    } catch (e) {
+      lastErr = e;
+      const msg = String((e && e.cause && e.cause.code) || (e && e.message) || e);
+      const transient = /ECONNRESET|ETIMEDOUT|ECONNREFUSED|EPIPE|fetch failed|socket hang up|network/i.test(msg);
+      if (transient && attempt < RETRIES) {
+        trace("LLM connection error (retrying)", msg, `attempt ${attempt}/${RETRIES}`);
+        await sleep(300 * attempt);
+        continue;
+      }
+      throw e;
+    }
   }
-  return json;
+  throw lastErr || new Error("LLM call failed after retries");
 }
 
 async function main() {
