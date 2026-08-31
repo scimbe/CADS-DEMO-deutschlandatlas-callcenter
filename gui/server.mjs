@@ -407,7 +407,7 @@ const jsonRes = (res, code, obj) => { res.writeHead(code, { 'content-type': 'app
 
 const server = createServer(async (req, res) => {
   if (req.method === 'GET' && (req.url === '/' || req.url === '/index.html')) {
-    try { res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); res.end(await readFile(join(__dir, 'index.html'))); }
+    try { const buf = await readFile(join(__dir, 'index.html')); res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); res.end(buf); }
     catch { res.writeHead(500); res.end('index.html missing'); }
     return;
   }
@@ -471,12 +471,12 @@ const server = createServer(async (req, res) => {
     return jsonRes(res, 200, { invite: inviteText, suggestions: validated, inviteAudioUrl });
   }
   if (req.method === 'GET' && /^\/fillers\/filler[1-9]\.wav$/.test(req.url)) {
-    try { res.writeHead(200, { 'content-type': 'audio/wav', 'cache-control': 'public, max-age=3600' }); res.end(await readFile(join(__dir, req.url.replace(/^\//, '')))); }
+    try { const buf = await readFile(join(__dir, req.url.replace(/^\//, ''))); res.writeHead(200, { 'content-type': 'audio/wav', 'cache-control': 'public, max-age=3600' }); res.end(buf); }
     catch { res.writeHead(404); res.end('no filler'); }
     return;
   }
   if (req.method === 'GET' && /^\/tts\/[\w.-]+\.wav$/.test(req.url)) {
-    try { res.writeHead(200, { 'content-type': 'audio/wav', 'cache-control': 'no-store' }); res.end(await readFile(join(TTS_DIR, req.url.replace('/tts/', '')))); }
+    try { const buf = await readFile(join(TTS_DIR, req.url.replace('/tts/', ''))); res.writeHead(200, { 'content-type': 'audio/wav', 'cache-control': 'no-store' }); res.end(buf); }
     catch { res.writeHead(404); res.end('no tts'); }
     return;
   }
@@ -496,3 +496,10 @@ const server = createServer(async (req, res) => {
 });
 const HOST = process.env.CC_HOST || '127.0.0.1';   // default local-only; set CC_HOST=0.0.0.0 in a container fronted by a tunnel
 server.listen(PORT, HOST, () => console.log(`callcenter GUI on http://${HOST}:${PORT}`));
+
+// A single bad request (e.g. a missing static asset hit by two writeHead calls, see the
+// 2026-08-31 fillers/ 404 incident that crash-looped every caller until fixed at the source)
+// must never take down the whole shared process for durable unattended hosting -- log and keep
+// serving everyone else instead of letting Node's default uncaught-exception behavior exit.
+process.on('uncaughtException', (err) => console.error('uncaughtException (server kept running):', err));
+process.on('unhandledRejection', (err) => console.error('unhandledRejection (server kept running):', err));
