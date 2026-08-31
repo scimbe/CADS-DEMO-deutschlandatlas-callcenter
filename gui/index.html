@@ -233,7 +233,10 @@
   let audioUnlocked=false;
   function unlockAudio(){ if(audioUnlocked)return; audioUnlocked=true;
     try{ player.muted=true; player.src='data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAgD4AAAB9AAACABAAZGF0YQAAAAA=';
-      const pr=player.play(); if(pr&&pr.then)pr.then(()=>{try{player.pause();player.currentTime=0;}catch(e){}player.muted=false;}).catch(()=>{player.muted=false;}); else player.muted=false;
+      // Only tear down the SILENT unlock clip if it is still the current source. With the greeting's
+      // first-gesture unlock (#1), this .then can resolve AFTER pump() has already loaded a real clip —
+      // pausing there would stop the real answer ("höre nichts"). Guard on the data: src.
+      const pr=player.play(); if(pr&&pr.then)pr.then(()=>{try{ if(String(player.src||'').startsWith('data:')){ player.pause(); player.currentTime=0; } }catch(e){} player.muted=false;}).catch(()=>{player.muted=false;}); else player.muted=false;
     }catch(e){ player.muted=false; } }
   function fill(it,url){ if(!it)return; it.ready=true; it.url=url||null; pump(); }
   function pump(){
