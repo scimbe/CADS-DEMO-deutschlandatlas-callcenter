@@ -246,12 +246,22 @@
     if(!it.ready) return;                                   // preserve order: never skip ahead of an unfilled slot
     if(!it.url){ it.played=true; pump(); return; }          // filled but silent -> skip to next
     seqBusy=true; it.played=true; speaking=true; try{player.muted=false;}catch(e){} showCtl(); setState('speak'); replay.style.display='none';
-    player.onended=()=>{ seqBusy=false; pump(); };
-    player.onerror=()=>{ seqBusy=false; pump(); };
-    const start=()=>player.play().catch(()=>{ replay.style.display='inline-block'; replay.onclick=()=>{player.play().then(()=>{replay.style.display='none';}).catch(()=>{}); }; });
+    let started=false, advanced=false;
+    // never let the queue hang on one clip: if it ends, errors, or its play() is rejected (e.g. a
+    // double-start AbortError under load), release seqBusy and move on. Previously a rejected play()
+    // only showed a replay button and left seqBusy=true -> the whole ordered queue stalled, so a
+    // fully-ready later clip never played ("höre nichts" despite ready audio).
+    const advance=()=>{ if(advanced)return; advanced=true; seqBusy=false; setTimeout(pump,0); };
+    player.onended=advance;
+    player.onerror=advance;
+    const start=()=>{ if(started||userPaused)return; started=true;   // guard: a single play() per clip -> no double-start AbortError
+      const pr=player.play();
+      if(pr&&pr.catch)pr.catch(()=>{ if(!player.ended&&(player.paused||player.currentTime===0)) advance(); });
+    };
     player.oncanplaythrough=()=>{ player.oncanplaythrough=null; if(!userPaused) start(); };   // buffer first -> no clipped start
     player.src=it.url; player.load();
-    setTimeout(()=>{ if(player.paused&&player.currentTime===0&&!userPaused&&seqBusy) start(); },500);
+    setTimeout(()=>{ if(player.paused&&player.currentTime===0&&!userPaused&&seqBusy&&!started) start(); },500);
+    setTimeout(()=>{ if(seqBusy&&!advanced&&player.paused&&player.currentTime===0) advance(); },9000);   // hard stall-breaker
   }
   function togglePause(){
     if(!userPaused){ userPaused=true; pauseBtn.textContent='▶︎ Weiter'; try{if(!player.paused)player.pause();}catch(e){} }
