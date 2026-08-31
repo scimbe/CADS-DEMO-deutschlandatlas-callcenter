@@ -16,7 +16,7 @@
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
 import { readFile, writeFile, rm } from 'node:fs/promises';
-import { readFileSync, mkdirSync, existsSync, readdirSync, unlinkSync, statSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, unlinkSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -62,10 +62,14 @@ function runPipeline(query) {
 // Wikipedia extracts put after a name — Piper would read them out as garbage. Prose/numbers untouched.
 function stripPronunciation(text) {
   return String(text || '')
-    .replace(/[\[(（][^\[\]()（）]*[ˈˌːˑ‿˥˦˧˨˩][^\[\]()（）]*[\])）]/gu, '')   // bracketed span containing an IPA stress/length/tone mark
-    .replace(/[\[(（][^\[\]()（）]*\bIPA\b[^\[\]()（）]*[\])）]/gi, '')          // explicit "IPA: …" span
+    .replace(/[\[(（][^\[\]()（）]*[ˈˌːˑ‿˥˦˧˨˩][^\[\]()（）]*[\])）]/gu, '')   // bracketed span with an IPA stress/length/tone mark
+    .replace(/[\[(（][^\[\]()（）]*\b(?:IPA|Aussprache|Lautschrift|phonetisch)\b[^\[\]()（）]*[\])）]/gi, '')   // bracketed pronunciation label
+    .replace(/\/[^/\n]{1,60}?[ˈˌːˑ‿][^/\n]{0,60}?\//gu, '')          // slash-delimited phonemic notation /haˈnoːfɐ/
+    .replace(/,?\s*\b(?:Aussprache|Lautschrift)\b\s*:?\s*(?=[,.;:]|\s|$)/gi, ' ')   // orphaned "Aussprache:" left after IPA removal — you never say the pronunciation guide
     .replace(/\s{2,}/g, ' ')
     .replace(/\s+([,.;:!?])/g, '$1')                                 // tidy space left before punctuation
+    .replace(/\(\s*\)/g, '')                                         // drop any empty () left behind
+    .replace(/\s{2,}/g, ' ')
     .trim();
 }
 
@@ -224,50 +228,108 @@ function deriveInvite(q) {
   if (m2) return `Möchten Sie auch wissen, wie viele ${m2[1]} es in ${m2[2]} gibt?`;
   return `Möchten Sie auch wissen: ${s}?`;
 }
+const WIKI_UA = { accept: 'application/json', 'user-agent': 'CADS-Demo-Callcenter/1.0 (https://bunsenbrenner.org)' };
+const factRotation = new Map();   // title -> next sentence offset, so repeats/similar places don't say the same thing
 async function wikiFunFact(place) {
   if (!place) return null;
   try {
-    const r = await fetch('https://de.wikipedia.org/api/rest_v1/page/summary/' + encodeURIComponent(place),
-      { headers: { accept: 'application/json', 'user-agent': 'CADS-Demo-Callcenter/1.0 (https://bunsenbrenner.org)' } });
-    if (!r.ok) return null;
-    const j = await r.json();
-    if (j.type === 'disambiguation' || !j.extract) return null;
-    // first 1-2 sentences, taken VERBATIM from Wikipedia as the source of truth (narrate() later restyles it, number-guarded)
-    const text = j.extract.split(/(?<=[.!?])\s+/).slice(0, 2).join(' ').trim();
+    const sres = await fetch('https://de.wikipedia.org/api/rest_v1/page/summary/' + encodeURIComponent(place), { headers: WIKI_UA });
+    if (!sres.ok) return null;
+    const sj = await sres.json();
+    if (sj.type === 'disambiguation' || !sj.extract) return null;
+    const title = sj.title || place;
+    const url = sj.content_urls?.desktop?.page || ('https://de.wikipedia.org/wiki/' + encodeURIComponent(place));
+    // fuller plain-text extract (all sections) for VARIETY — not just the always-identical lead
+    let sentences = [];
+    try {
+      const fres = await fetch('https://de.wikipedia.org/w/api.php?action=query&prop=extracts&explaintext=1&exsectionformat=plain&redirects=1&format=json&titles=' + encodeURIComponent(title), { headers: WIKI_UA });
+      const fj = await fres.json();
+      const full = Object.values(fj?.query?.pages || {})[0]?.extract || sj.extract;
+      sentences = full.split(/(?<=[.!?])\s+/).map((s) => s.trim())
+        .filter((s) => s.length >= 40 && s.length <= 240 && /[a-zäöü]/i.test(s) && !s.includes('=='));
+    } catch { /* fall back to the summary below */ }
+    if (!sentences.length) sentences = sj.extract.split(/(?<=[.!?])\s+/).map((s) => s.trim()).filter((s) => s.length >= 25);
+    if (!sentences.length) return null;
+    const off = factRotation.get(title) || 0; factRotation.set(title, off + 1);
+    const idx = off % sentences.length;
+    const one = sentences[idx];
+    // pair with the next sentence when the picked one is short, for a fuller fact
+    const text = (one.length < 120 && idx + 1 < sentences.length) ? (one + ' ' + sentences[idx + 1]).slice(0, 300) : one.slice(0, 300);
     if (text.length < 20) return null;
-    return { text, title: j.title || place, url: j.content_urls?.desktop?.page || ('https://de.wikipedia.org/wiki/' + encodeURIComponent(place)) };
+    return { text, title, url };
   } catch { return null; }
 }
 
 // --- speculation cache: query -> Promise<{ok,answer,meta,audioUrl,funfact,err}> ---
 const specCache = new Map();
+// Persistent reuse cache (RAG-style): a query that already ran and produced grounded data is reused
+// (skips the whole ArcGIS pipeline + narration), so a known request replays instantly. The fun fact is
+// deliberately NOT cached here — it stays fresh/varied per turn (see /context). TTL is the "nothing changed" proxy.
+const Q_CACHE = join(tmpdir(), 'cc-qcache');
+const Q_TTL_MS = 12 * 3600 * 1000;
+const qKey = (q) => Buffer.from(String(q || '').trim().toLowerCase().replace(/\s+/g, ' ')).toString('base64url').slice(0, 120);
+function diskGet(q) {
+  try { const f = join(Q_CACHE, qKey(q) + '.json'); if (!existsSync(f)) return null;
+    const j = JSON.parse(readFileSync(f, 'utf8')); return (j && (Date.now() - (j.ts || 0)) < Q_TTL_MS) ? j : null; } catch { return null; }
+}
+function diskPut(q, obj) { try { mkdirSync(Q_CACHE, { recursive: true }); writeFileSync(join(Q_CACHE, qKey(q) + '.json'), JSON.stringify({ ...obj, ts: Date.now() })); } catch {} }
+
 function answerFor(query) {
   const key = (query || '').trim();
-  if (!key) return Promise.resolve({ ok: false, answer: null, meta: null, audioUrl: null, funfact: null, err: 'empty' });
+  if (!key) return Promise.resolve({ ok: false, answer: null, meta: null, audioUrl: null, err: 'empty' });
   if (specCache.has(key)) return specCache.get(key);
   const promise = (async () => {
-    const [r, funfact] = await Promise.all([runPipeline(key), wikiFunFact(placeFromQuery(key))]);  // Wikipedia in parallel
-    const rawAnswer = r.final?.text || r.final?.answer || null;
-    const meta = r.final?.meta || null;
-    // narrative style for the answer + entertaining spoken style for the fun fact -- strictly grounded (number-guarded)
-    const [answer, ffText] = await Promise.all([
-      rawAnswer ? narrate(rawAnswer, 'answer') : Promise.resolve(null),
-      funfact ? narrate(funfact.text, 'funfact') : Promise.resolve(null),
-    ]);
-    let au = null, ffAu = null;
-    await Promise.all([                                              // answer + fun-fact spoken in parallel (both Thorsten)
-      answer ? ttsSpeak(answer, 'primary').then((u) => { au = u; }, () => {}) : Promise.resolve(),
-      ffText ? ttsSpeak(ffText, 'primary').then((u) => { ffAu = u; }, () => {}) : Promise.resolve(),
-    ]);
-    const ff = funfact ? { ...funfact, text: ffText || funfact.text, audioUrl: proxied(ffAu) } : null;
-    return { ok: r.ok, answer, meta, audioUrl: proxied(au), funfact: ff, err: r.ok ? null : (r.err || 'pipeline failed') };
+    let answer, meta, ok, err = null, reused = false;
+    const cached = diskGet(key);
+    if (cached && cached.answer && cached.meta) {           // reuse: same request ran before, data unchanged within TTL
+      answer = cached.answer; meta = cached.meta; ok = true; reused = true;
+    } else {
+      const r = await runPipeline(key);
+      const rawAnswer = r.final?.text || r.final?.answer || null;
+      meta = r.final?.meta || null; ok = r.ok; err = r.ok ? null : (r.err || 'pipeline failed');
+      answer = rawAnswer ? await narrate(rawAnswer, 'answer') : null;   // narrative style, number-guarded
+      if (ok && answer && meta && meta.table && meta.has_real_data !== false) diskPut(key, { answer, meta });
+    }
+    let au = null; if (answer) { try { au = await ttsSpeak(answer, 'primary'); } catch {} }
+    return { ok, answer, meta, audioUrl: proxied(au), reused, err };
   })();
   specCache.set(key, promise);
-  // cache only successes: drop failed/empty runs so transient pipeline flakiness can be retried (never cached as "no data")
+  // cache only successes in memory: drop failed/empty runs so transient flakiness can be retried
   promise.then((r) => { if (!r || !r.ok || !(r.meta && r.meta.table && r.meta.has_real_data !== false)) specCache.delete(key); },
     () => specCache.delete(key));
-  if (specCache.size > 80) specCache.delete(specCache.keys().next().value);   // keep validated follow-ups warm until clicked
+  if (specCache.size > 80) specCache.delete(specCache.keys().next().value);
   return promise;
+}
+
+// Part 1 "Verstehen": a short spoken confirmation of the understood question (varied lead-in).
+const VERSTEHEN_LEADINS = ['Verstanden — Ihre Frage lautet', 'Alles klar, Sie möchten wissen', 'Gut, Sie fragen', 'Ich habe verstanden — Sie möchten wissen', 'In Ordnung, Ihre Frage ist'];
+let verstehenRot = 0;
+function verstehenText(query) {
+  const q = String(query || '').trim();
+  return VERSTEHEN_LEADINS[(verstehenRot++) % VERSTEHEN_LEADINS.length] + ': ' + q;
+}
+
+// Part 2 "Überbrücken": a short bridge — first turn introduces the service (varied), later turns
+// loosely reference the previous interaction. Prepared in advance by the client so it plays instantly.
+const SERVICE_INTROS = [
+  'Willkommen beim Deutschlandatlas-Sprach-Callcenter. Ich beantworte Ihre Fragen zu Regionaldaten in Deutschland — immer geerdet auf echten, live abgefragten Zahlen.',
+  'Schön, dass Sie da sind. Dies ist das Deutschlandatlas-Sprach-Callcenter: Fragen Sie mich zu Kriminalität, Bildung, Beschäftigung oder Wohnen in Ihrer Region.',
+  'Hier spricht das Deutschlandatlas-Callcenter. Ich hole für Sie echte Regionaldaten aus dem Deutschlandatlas — nichts erfunden, alles direkt aus der Quelle.',
+  'Guten Tag, willkommen beim Sprach-Callcenter zum Deutschlandatlas. Stellen Sie mir Ihre Frage zu einem Ort in Deutschland, ich sehe für Sie in den echten Daten nach.',
+];
+let introRot = 0;
+async function introBridge(context) {
+  const last = context && context.lastQuery;
+  let text;
+  if (last) {
+    const u = await llmJSON(
+      'Formuliere EINEN sehr kurzen, freundlichen deutschen Überleitungssatz für ein Callcenter, der lose an die zuletzt beantwortete Frage anknüpft und zur nächsten überleitet. Variiere die Formulierung, kein Aussprache-Hinweis. Antworte NUR als striktes JSON: {"text": "..."}',
+      'Zuletzt beantwortet: ' + String(last).slice(0, 200));
+    text = (u && typeof u.text === 'string' && u.text.trim()) ? u.text.trim() : 'Kommen wir zu Ihrer nächsten Frage.';
+  } else {
+    text = SERVICE_INTROS[(introRot++) % SERVICE_INTROS.length];
+  }
+  return stripPronunciation(text);
 }
 
 async function llmJSON(system, user) {
@@ -478,14 +540,29 @@ const server = createServer(async (req, res) => {
     return jsonRes(res, 200, { text });
   }
   if (req.method === 'POST' && req.url === '/context') {
-    // fast, standalone context blurb (Wikipedia only, no ArcGIS pipeline) to fill the wait while /answer runs
-    const q = ((await readBody(req)).query || '').toString().slice(0, 300);
+    // fast, pre-answer parts (no ArcGIS pipeline): part 1 "Verstehen" (confirm the question) + part 3
+    // "Wussten Sie schon" (a VARIED, fresh Wikipedia fact). Filled into the ordered speech queue on the client.
+    const b = await readBody(req);
+    const q = (b.query || '').toString().slice(0, 300);
     const place = placeFromQuery(q) || q;
+    const vtext = stripPronunciation(verstehenText(q));
+    let vau = null, funfact = null;
     const ff = await wikiFunFact(place);
-    if (!ff || !ff.text) return jsonRes(res, 200, { funfact: null });
-    const text = stripPronunciation(await narrate(ff.text, 'funfact'));   // entertaining + TTS-safe
+    let ftext = null, fau = null;
+    if (ff && ff.text) ftext = stripPronunciation(await narrate(ff.text, 'funfact'));
+    await Promise.all([
+      ttsSpeak(vtext, 'primary').then((u) => { vau = u; }, () => {}),
+      ftext ? ttsSpeak(ftext, 'primary').then((u) => { fau = u; }, () => {}) : Promise.resolve(),
+    ]);
+    if (ff && ftext) funfact = { ...ff, text: ftext, audioUrl: proxied(fau) };
+    return jsonRes(res, 200, { verstehen: { text: vtext, audioUrl: proxied(vau) }, funfact });
+  }
+  if (req.method === 'POST' && req.url === '/intro') {
+    // part 2 "Überbrücken" — prepared in advance by the client (first turn: service intro; later: bridge)
+    const b = await readBody(req);
+    const text = await introBridge(b.context || {});
     let au = null; try { au = await ttsSpeak(text, 'primary'); } catch {}
-    return jsonRes(res, 200, { funfact: { ...ff, text, audioUrl: proxied(au) } });
+    return jsonRes(res, 200, { text, audioUrl: proxied(au) });
   }
   if (req.method === 'POST' && (req.url === '/answer' || req.url === '/ask')) {
     const query = ((await readBody(req)).query || '').toString().slice(0, 300);
