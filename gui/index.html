@@ -204,7 +204,7 @@
   // queue is stalled waiting for a not-yet-ready clip (above all the slow /answer), loop pre-rendered
   // Thorsten wait-clips on a SEPARATE audio element so the caller is never left in silence. Stopped the
   // instant a real ordered clip starts (they play on #player; fillers on #filler, never overlapping).
-  let fillerActive=false, fillerTimer=null;
+  let fillerActive=false, fillerTimer=null, awaitingAnswer=false;   // awaitingAnswer: a request is in flight (understand/answer) -> keep bridging even when the queue is momentarily empty
   function startFillerLoop(){ if(fillerActive||userPaused||fillerTimer)return;
     // only kick in after a real wait (>1.2s) so quick gaps between fast clips don't blip a half-word
     fillerTimer=setTimeout(()=>{ fillerTimer=null; if(userPaused||seqBusy)return; fillerActive=true; fillerEl.onended=()=>{ if(fillerActive&&!userPaused) playFiller(); }; playFiller(); },1200); }
@@ -255,7 +255,8 @@
   function pump(){
     if(seqBusy||userPaused) return;
     const it=seq.find(s=>!s.played);
-    if(!it){ setState('done'); speaking=false; stopFillerLoop(); return; }
+    if(!it){ if(awaitingAnswer){ startFillerLoop(); return; }   // queue momentarily empty but a request is still computing -> keep bridging, more slots are coming
+      setState('done'); speaking=false; stopFillerLoop(); return; }
     if(!it.ready){ startFillerLoop(); return; }             // preserve order: never skip ahead of an unfilled slot — but bridge the wait with spoken fillers
     if(!it.url){ it.played=true; pump(); return; }          // filled but silent -> skip to next
     stopFillerLoop();                                       // a real ordered clip is about to play -> silence the filler
@@ -357,6 +358,7 @@
   async function ask(){
     const query=q.value.trim(); if(!query) return; unlockAudio();
     greeted=true; hideWelcome();   // asking counts as greeted — the turn-0 intro is the opener, no separate greeting
+    awaitingAnswer=true;           // request in flight -> fillers bridge the whole compute wait (incl. the /understand phase before slots exist)
     const pivot=followupActive; followupActive=false;   // typed a new question while a follow-up was on offer
     go.disabled=true; q.disabled=true; reset(); newTurn();
     // #5: on a topic pivot, open with the pre-synthesized "also an interesting question" ack instead of
@@ -373,6 +375,7 @@
       go.disabled=false; q.disabled=false;
       if(u.slots) slotsDS={ort:u.slots.ort||slotsDS.ort, indikator:u.slots.indikator||slotsDS.indikator};
       if(u.precise){ pending=null; deliver(u.best_guess, u.kind==='anschluss'||u.kind==='klarstellung', {continued:true, ctxP:(u.best_guess===query?ctxP:null)}); return; }
+      awaitingAnswer=false; stopFillerLoop();   // a clarify question (not a long answer) is now spoken -> no more bridging
       pending={clarify:u.clarify||'', best_guess:u.best_guess||'', options:u.options||[], original:query};
       setState('idle');
       aEl.className='a'; aEl.textContent=u.clarify||'Können Sie Ihre Frage etwas genauer stellen?';
@@ -381,13 +384,14 @@
       (u.options||[]).forEach(o=>{ if(o&&o!==u.best_guess) items.push({label:o,onClick:()=>deliver(o,false)}); });
       renderBubbles(items,'<span class="spin"></span>Wahrscheinlichste Antwort wird bereits vorbereitet …');
       q.value=''; q.focus();
-    }catch(e){go.disabled=false;q.disabled=false;stopWait();aEl.className='a';aEl.textContent='Verbindungsfehler: '+e.message;setState('done');}
+    }catch(e){awaitingAnswer=false;stopFillerLoop();go.disabled=false;q.disabled=false;stopWait();aEl.className='a';aEl.textContent='Verbindungsfehler: '+e.message;setState('done');}
   }
 
   // phase 2 - deliver: Ueberbruecken (already playing) -> Verstehen -> Wussten Sie schon -> Antwort, all in order
   async function deliver(query, isFollowup, opts){
     opts=opts||{};
     unlockAudio(); pending=null; followupActive=false;   // a delivered/clicked answer is not a topic pivot
+    awaitingAnswer=true;                                  // fillers bridge until the answer slot is filled
     go.disabled=true; q.disabled=true;
     if(!opts.continued){ reset(); newTurn(); startBridge(); }   // fresh turn (bubble click): bridge plays immediately
     qEcho.innerHTML='<span>'+(isFollowup?'Weiter gefragt:':'Frage:')+'</span> <b></b>'; qEcho.querySelector('b').textContent=query;
@@ -412,6 +416,7 @@
             srcTxt.innerHTML='<span class="pill">'+(m.table||'—')+'</span> <span class="pill">'+(m.place_resolved||m.place_name_requested||'')+'</span> <span class="pill">'+(m.live_rows_used||0)+' Live-Zeile(n)</span>';}
         }
       });
+      awaitingAnswer=false;   // the answer slot is now in the queue -> normal ordered pump takes over
       fill(sA, d.audioUrl);
       lastQuery=query; lastAnswer=ans;
       history.push({q:query, place:(d.meta&&(d.meta.place_resolved||d.meta.place_name_requested))||null, answer:ans});
@@ -419,7 +424,7 @@
       go.disabled=false; q.disabled=false;
       const sI=slot();
       doFollowup(query, ans).then(u=>fill(sI, u));
-    }catch(e){stopWait();aEl.className='a';aEl.textContent='Verbindungsfehler: '+e.message;setState('done');go.disabled=false;q.disabled=false;fill(sV,null);fill(sF,null);fill(sA,null);}
+    }catch(e){awaitingAnswer=false;stopFillerLoop();stopWait();aEl.className='a';aEl.textContent='Verbindungsfehler: '+e.message;setState('done');go.disabled=false;q.disabled=false;fill(sV,null);fill(sF,null);fill(sA,null);}
     finally{ prepareNextIntro(); prepareTopicAck(); }   // I5: refresh next bridge + new-topic ack on EVERY path
   }
 
