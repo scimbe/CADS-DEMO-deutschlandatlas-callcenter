@@ -1,15 +1,20 @@
-# Deutschlandatlas Sprach-Callcenter — self-contained container for durable hosting.
+# Deutschlandatlas Sprach-Callcenter — container for durable hosting.
 #
 # The GUI backend (gui/server.mjs) is pure Node (no npm deps). It shells out to:
 #   - whisper.cpp `whisper-cli` for server-side STT (built here, pinned tag b4938, multilingual ggml-base)
-#   - local **Piper** (`piper`) with the bundled de_DE-thorsten-medium voice for the Thorsten TTS  <-- self-contained, NO channel/grant
+#   - TTS is CHANNEL-FIRST with a Piper runtime fallback (since #29/#30): the production voice is the
+#     llm2 agent `audio_generation` channel via ct-agent (provide CT_AGENT_BIN / CT_RELAY_ENV /
+#     CT_AUDIO_CHANNEL_ID at run time — the ct-agent binary + relay-env-file are bind-mounted, NOT
+#     baked into this image). The bundled local **Piper** (de_DE-thorsten-medium) is the automatic
+#     fallback used when a channel call fails at request time, so a turn is never silent.
 #   - `node scripts/n8n_workflow_runtime.mjs` for the live Deutschlandatlas ArcGIS/catalog pipeline (Node builtins)
 #
 # Footprint is STATIC: STT temp files are deleted per request; TTS WAVs go to a capped temp dir
 # (pruned to the last 100); the speculation cache is in-memory (capped). Nothing accumulates unboundedly.
 #
-# Fully self-contained — no ct-agent channel, no grant, no cross-host dependency. Only external
-# runtime dep is the litellm-proxy (LLM) for the pipeline, via LITELLM_* env.
+# Runtime deps: the litellm-proxy (LLM, via LITELLM_* env) always; the llm2 audio_generation channel
+# when channel TTS is enabled (with Piper as the local fallback). No channel secrets are baked in —
+# the grant/keys live only in the bind-mounted relay-env-file provided at deploy time.
 
 ARG TARGETARCH
 
