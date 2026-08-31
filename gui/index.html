@@ -200,6 +200,15 @@
   let lastFiller=-1;
   function playFiller(){try{let n;do{n=Math.floor(Math.random()*FILLERS.length);}while(FILLERS.length>1&&n===lastFiller);lastFiller=n;fillerEl.src=FILLERS[n];fillerEl.play().catch(()=>{});}catch(e){}}
   function stopFiller(){try{fillerEl.pause();fillerEl.currentTime=0;}catch(e){}}
+  // Bridge the compute wait with SPOKEN filler clips (the operator's core intent): whenever the ordered
+  // queue is stalled waiting for a not-yet-ready clip (above all the slow /answer), loop pre-rendered
+  // Thorsten wait-clips on a SEPARATE audio element so the caller is never left in silence. Stopped the
+  // instant a real ordered clip starts (they play on #player; fillers on #filler, never overlapping).
+  let fillerActive=false, fillerTimer=null;
+  function startFillerLoop(){ if(fillerActive||userPaused||fillerTimer)return;
+    // only kick in after a real wait (>1.2s) so quick gaps between fast clips don't blip a half-word
+    fillerTimer=setTimeout(()=>{ fillerTimer=null; if(userPaused||seqBusy)return; fillerActive=true; fillerEl.onended=()=>{ if(fillerActive&&!userPaused) playFiller(); }; playFiller(); },1200); }
+  function stopFillerLoop(){ if(fillerTimer){clearTimeout(fillerTimer);fillerTimer=null;} if(!fillerActive)return; fillerActive=false; fillerEl.onended=null; stopFiller(); }
 
   const STATUS=['Ich habe Ihre Frage verstanden …','Ich suche die passende Deutschlandatlas-Tabelle …','Ich frage die Live-Daten bei der amtlichen Quelle ab …','Ich prüfe die Werte und formuliere Ihre Antwort …'];
   let statusTimer=null,tickTimer=null,t0=0;
@@ -225,7 +234,7 @@
   // and the next slot is filled, so order holds and nothing is interrupted (even when the real
   // answer arrives during an earlier clip).
   let seq=[], seqBusy=false;
-  function newTurn(){ seq=[]; seqBusy=false; speaking=false; try{player.pause();player.currentTime=0;player.onended=null;player.oncanplaythrough=null;}catch(e){} }
+  function newTurn(){ seq=[]; seqBusy=false; speaking=false; stopFillerLoop(); try{player.pause();player.currentTime=0;player.onended=null;player.oncanplaythrough=null;}catch(e){} }
   function slot(){ const it={ready:false,url:null,played:false}; seq.push(it); return it; }
   // Unlock audio within the user gesture (a click): browsers block a later play() once the
   // click's transient activation has expired -- and our first real clip only plays after /context
@@ -237,14 +246,19 @@
       // first-gesture unlock (#1), this .then can resolve AFTER pump() has already loaded a real clip —
       // pausing there would stop the real answer ("höre nichts"). Guard on the data: src.
       const pr=player.play(); if(pr&&pr.then)pr.then(()=>{try{ if(String(player.src||'').startsWith('data:')){ player.pause(); player.currentTime=0; } }catch(e){} player.muted=false;}).catch(()=>{player.muted=false;}); else player.muted=false;
-    }catch(e){ player.muted=false; } }
+    }catch(e){ player.muted=false; }
+    // also unlock the SEPARATE filler element so wait-bridging clips can autoplay later in the turn
+    try{ fillerEl.muted=true; fillerEl.src='data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAgD4AAAB9AAACABAAZGF0YQAAAAA=';
+      const fp=fillerEl.play(); if(fp&&fp.then)fp.then(()=>{try{ if(String(fillerEl.src||'').startsWith('data:')){ fillerEl.pause(); fillerEl.currentTime=0; } }catch(e){} fillerEl.muted=false;}).catch(()=>{fillerEl.muted=false;}); else fillerEl.muted=false;
+    }catch(e){ fillerEl.muted=false; } }
   function fill(it,url){ if(!it)return; it.ready=true; it.url=url||null; pump(); }
   function pump(){
     if(seqBusy||userPaused) return;
     const it=seq.find(s=>!s.played);
-    if(!it){ setState('done'); speaking=false; return; }
-    if(!it.ready) return;                                   // preserve order: never skip ahead of an unfilled slot
+    if(!it){ setState('done'); speaking=false; stopFillerLoop(); return; }
+    if(!it.ready){ startFillerLoop(); return; }             // preserve order: never skip ahead of an unfilled slot — but bridge the wait with spoken fillers
     if(!it.url){ it.played=true; pump(); return; }          // filled but silent -> skip to next
+    stopFillerLoop();                                       // a real ordered clip is about to play -> silence the filler
     seqBusy=true; it.played=true; speaking=true; try{player.muted=false;}catch(e){} showCtl(); setState('speak'); replay.style.display='none';
     let started=false, advanced=false;
     // never let the queue hang on one clip: if it ends, errors, or its play() is rejected (e.g. a
@@ -264,12 +278,12 @@
     setTimeout(()=>{ if(seqBusy&&!advanced&&player.paused&&player.currentTime===0) advance(); },9000);   // hard stall-breaker
   }
   function togglePause(){
-    if(!userPaused){ userPaused=true; pauseBtn.textContent='▶︎ Weiter'; try{if(!player.paused)player.pause();}catch(e){} }
+    if(!userPaused){ userPaused=true; pauseBtn.textContent='▶︎ Weiter'; stopFillerLoop(); try{if(!player.paused)player.pause();}catch(e){} }
     else { userPaused=false; pauseBtn.textContent='⏸ Pause';
       if(player.src&&player.paused&&player.currentTime>0&&!player.ended){ player.play().catch(()=>{}); }
       else { seqBusy=false; pump(); } }
   }
-  function stopAll(){ seq.forEach(s=>s.played=true); seqBusy=false; speaking=false; userPaused=false; pauseBtn.textContent='⏸ Pause';
+  function stopAll(){ seq.forEach(s=>s.played=true); seqBusy=false; speaking=false; userPaused=false; pauseBtn.textContent='⏸ Pause'; stopFillerLoop();
     try{player.pause();player.currentTime=0;player.onended=null;}catch(e){} setState('done'); hideCtl(); }
   pauseBtn.onclick=togglePause; stopBtn.onclick=stopAll;
 
