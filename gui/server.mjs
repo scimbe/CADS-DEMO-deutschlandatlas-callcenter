@@ -119,9 +119,16 @@ function ttsLocalPiper(text) {
 function ttsSpeak(text, voice = 'primary') {
   text = stripPronunciation(text);
   if (process.env.CC_TTS !== '1') return Promise.resolve(null);
-  if (process.env.CC_PIPER_BIN && process.env.CC_PIPER_MODEL) return ttsLocalPiper(text);   // local Piper (durable host) — no channel
+  // Production TTS is the llm2/labor agent `audio_generation` channel (operator directive: the voice
+  // is offered THROUGH the agent channel, not a bundled engine). It takes precedence whenever its
+  // env is configured. Local Piper stays ONLY as an explicit offline fallback for a deploy that
+  // provides no channel env at all.
   const CT = process.env.CT_AGENT_BIN, RELAY = process.env.CT_RELAY_ENV, CH = process.env.CT_AUDIO_CHANNEL_ID;
-  if (!CT || !RELAY || !CH) return Promise.resolve(null);
+  const channelReady = CT && RELAY && CH;
+  if (!channelReady) {
+    if (process.env.CC_PIPER_BIN && process.env.CC_PIPER_MODEL) return ttsLocalPiper(text);   // offline fallback only
+    return Promise.resolve(null);
+  }
   return new Promise((resolve) => {
     const payload = JSON.stringify({ text, voice });
     const p = spawn('bash', ['-c',
@@ -679,8 +686,17 @@ const server = createServer(async (req, res) => {
       const u = new URL(req.url, 'http://x').searchParams.get('u') || '';
       const parsed = new URL(u);
       if (parsed.protocol !== 'https:' || !parsed.hostname.endsWith('bunsenbrenner.org')) { res.writeHead(400); res.end('bad url'); return; }
-      const up = await fetch(u);
-      if (!up.ok) { res.writeHead(502); res.end('upstream ' + up.status); return; }
+      // The channel fileserver (llm2/labor audio_generation) can hiccup with a transient 502 under
+      // load or a brief restart. Retry a few times with a short backoff before giving up, so a single
+      // upstream blip doesn't drop a spoken part. (A truly evicted clip stays 502 — the client's
+      // pump() then skips that part and continues, so the sequence never hangs.)
+      let up = null;
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try { up = await fetch(u); } catch { up = null; }
+        if (up && up.ok) break;
+        if (attempt < 3) await _sleep(250 * attempt);
+      }
+      if (!up || !up.ok) { res.writeHead(502); res.end('upstream ' + (up ? up.status : 'fetch-failed')); return; }
       res.writeHead(200, { 'content-type': up.headers.get('content-type') || 'audio/wav', 'cache-control': 'no-store', 'access-control-allow-origin': '*' });
       res.end(Buffer.from(await up.arrayBuffer()));
     } catch { res.writeHead(500); res.end('proxy err'); }

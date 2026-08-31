@@ -81,14 +81,16 @@ RUN chmod +x /opt/whisper-cli-bin/whisper-cli /opt/piper/piper
 # didn't throw.
 RUN chown -R node:node /app
 
-# non-secret defaults; secrets come from --env-file at run time (see deploy/.env.template)
+# non-secret defaults; secrets come from --env-file at run time (see deploy/.env.template).
+# TTS defaults to the llm2/labor agent audio_generation channel (production voice path) — provide
+# CT_AGENT_BIN / CT_RELAY_ENV / CT_AUDIO_CHANNEL_ID at run time. The Thorsten Piper voice is bundled
+# below but is NOT selected by default: set CC_PIPER_BIN + CC_PIPER_MODEL only for an offline fallback
+# deploy. This is why CC_PIPER_* are deliberately absent from these ENV defaults.
 ENV CC_HOST=0.0.0.0 \
     PORT=8791 \
     CC_TTS=1 \
     CC_WHISPER_MODEL=/app/models/ggml-base.bin \
     CC_WHISPER_CLI=whisper-cli \
-    CC_PIPER_BIN=/opt/piper/piper \
-    CC_PIPER_MODEL=/app/voices/de_DE-thorsten-medium.onnx \
     PATH=/opt/whisper-cli-bin:${PATH} \
     LD_LIBRARY_PATH=/opt/whisper-cli-bin:/opt/piper \
     NODE_ENV=production
