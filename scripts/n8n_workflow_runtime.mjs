@@ -91,8 +91,29 @@ async function esriGet(url, params) {
   const qs = new URLSearchParams(params).toString();
   const full = `${url}?${qs}`;
   trace("GET", full);
-  const resp = await fetch(full, { headers: { "User-Agent": "callcenter-pipeline/1.0" } });
-  return resp.json();
+  // The karto365 ArcGIS API resets connections under load (ECONNRESET / UND_ERR_SOCKET, bytesRead 0).
+  // A single reset otherwise fails the whole answer -> retry transient network/5xx errors a few times
+  // with a short backoff before giving up (GET is idempotent, safe to repeat).
+  const RETRIES = 3;
+  let lastErr = null;
+  for (let attempt = 1; attempt <= RETRIES; attempt++) {
+    try {
+      const resp = await fetch(full, { headers: { "User-Agent": "callcenter-pipeline/1.0" } });
+      if (!resp.ok) {
+        if (resp.status >= 500 && attempt < RETRIES) { trace("ArcGIS HTTP", resp.status, `retry ${attempt}/${RETRIES}`); await sleep(400 * attempt); continue; }
+        return resp.json();
+      }
+      return await resp.json();
+    } catch (e) {
+      lastErr = e;
+      const msg = String((e && e.cause && e.cause.code) || (e && e.message) || e);
+      if (/ECONNRESET|UND_ERR_SOCKET|ETIMEDOUT|ECONNREFUSED|EPIPE|fetch failed|socket|network/i.test(msg) && attempt < RETRIES) {
+        trace("ArcGIS connection error (retrying)", msg, `attempt ${attempt}/${RETRIES}`); await sleep(400 * attempt); continue;
+      }
+      throw e;
+    }
+  }
+  throw lastErr || new Error("esriGet failed after retries");
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
