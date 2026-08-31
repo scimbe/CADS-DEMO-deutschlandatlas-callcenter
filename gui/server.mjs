@@ -234,14 +234,32 @@ function swapCityFollowups(query, place, n) {
   return out;
 }
 
-// Turn a (validated, answerable) suggestion into a fully-formulated spoken invite question.
+// Turn a (validated, answerable) suggestion into a spoken LEAD-IN: Thorsten does not passively
+// offer, he ACTIVELY guides the caller onward to the next question, knüpft an das laufende
+// Gespräch an, varied so consecutive turns don't repeat, and ALWAYS ends as a clear closed
+// question so the one-click "Ja" bubble works. The concrete question core is derived from a
+// VALIDATED suggestion (guaranteed answerable); only the leading wrapper varies.
+let inviteRot = 0;
 function deriveInvite(q) {
   const s = (q || '').trim().replace(/\?+$/, '');
+  let core = null;
   const m = s.match(/^wie\s+hoch\s+ist\s+(.+?)\s+in\s+(.+)$/i);
-  if (m) return `Möchten Sie auch wissen, wie hoch ${m[1]} in ${m[2]} ist?`;
-  const m2 = s.match(/^wie\s+viele?\s+(.+?)\s+(?:gibt es\s+)?in\s+(.+)$/i);
-  if (m2) return `Möchten Sie auch wissen, wie viele ${m2[1]} es in ${m2[2]} gibt?`;
-  return `Möchten Sie auch wissen: ${s}?`;
+  if (m) core = `wie hoch ${m[1]} in ${m[2]} ist`;
+  if (!core) { const m2 = s.match(/^wie\s+viele?\s+(.+?)\s+(?:gibt es\s+)?in\s+(.+)$/i); if (m2) core = `wie viele ${m2[1]} es in ${m2[2]} gibt`; }
+  // fully-leading variants (used when we could parse Indikator+Ort) vs. a lighter wrap otherwise
+  const leads = core ? [
+    `Bleiben wir gleich dran: soll ich Ihnen auch sagen, ${core}?`,
+    `Da wir schon dabei sind — ich schaue direkt weiter: möchten Sie wissen, ${core}?`,
+    `Ich führe Sie nahtlos weiter: interessiert Sie auch, ${core}?`,
+    `Wenn Sie mögen, gehe ich gleich einen Schritt weiter: soll ich nachsehen, ${core}?`,
+    `Passend dazu hätte ich noch etwas: möchten Sie auch erfahren, ${core}?`,
+    `Und weil es sich anbietet — sagen Sie einfach ja, dann verrate ich Ihnen, ${core}.`,
+  ] : [
+    `Bleiben wir gleich dran: möchten Sie auch wissen: ${s}?`,
+    `Ich führe Sie direkt weiter — soll ich nachsehen: ${s}?`,
+    `Passend dazu: interessiert Sie auch: ${s}?`,
+  ];
+  return leads[(inviteRot++) % leads.length];
 }
 const WIKI_UA = { accept: 'application/json', 'user-agent': 'CADS-Demo-Callcenter/1.0 (https://bunsenbrenner.org)' };
 const factRotation = new Map();   // title -> next sentence offset, so repeats/similar places don't say the same thing
