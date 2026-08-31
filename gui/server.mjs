@@ -119,6 +119,36 @@ function ttsSpeak(text, voice = 'primary') {
 }
 const proxied = (u) => (u ? (u.startsWith('/') ? u : '/audio?u=' + encodeURIComponent(u)) : null);
 
+// Wait-time filler clips are *.wav (gitignored) so they never ship in a deploy. When local Piper
+// is available, synthesize them from a phrase list on startup — so the feature is self-contained
+// and never a missing-file dependency (which previously 404'd; the route now degrades gracefully).
+const FILLER_PHRASES = [
+  'Einen kleinen Moment bitte, ich sehe für Sie in den Daten nach.',
+  'Ich frage gerade die Deutschlandatlas-Datenbank ab.',
+  'Das dauert nur einen kurzen Augenblick.',
+  'Ich hole die aktuellen Zahlen für Sie heraus.',
+  'Gleich habe ich das Ergebnis für Sie.',
+  'Ich prüfe die passende Tabelle im Datensatz.',
+];
+async function ensureFillers() {
+  if (!process.env.CC_PIPER_BIN || !process.env.CC_PIPER_MODEL) return;   // only the self-contained Piper deploy
+  const dir = join(__dir, 'fillers');
+  try { mkdirSync(dir, { recursive: true }); } catch {}
+  let made = 0;
+  for (let i = 0; i < FILLER_PHRASES.length; i++) {
+    const f = join(dir, `filler${i + 1}.wav`);
+    if (existsSync(f)) continue;
+    await new Promise((res) => {
+      try {
+        const p = spawn(process.env.CC_PIPER_BIN, ['--model', process.env.CC_PIPER_MODEL, '--output_file', f], { env: process.env });
+        p.stdin.on('error', () => {}); p.stdin.end(stripPronunciation(FILLER_PHRASES[i]));
+        p.on('close', () => { made++; res(); }); p.on('error', () => res());
+      } catch { res(); }
+    });
+  }
+  if (made) console.log(`fillers: synthesized ${made} Thorsten wait-clip(s) via Piper`);
+}
+
 // --- server-side speech-to-text via local whisper.cpp (no browser cloud dependency) ---
 let sttSeq = 0;
 function run(cmd, args) {
@@ -496,6 +526,7 @@ const server = createServer(async (req, res) => {
 });
 const HOST = process.env.CC_HOST || '127.0.0.1';   // default local-only; set CC_HOST=0.0.0.0 in a container fronted by a tunnel
 server.listen(PORT, HOST, () => console.log(`callcenter GUI on http://${HOST}:${PORT}`));
+ensureFillers().catch(() => {});   // self-contained wait-clips (no-op if already present or no Piper)
 
 // A single bad request (e.g. a missing static asset hit by two writeHead calls, see the
 // 2026-08-31 fillers/ 404 incident that crash-looped every caller until fixed at the source)
