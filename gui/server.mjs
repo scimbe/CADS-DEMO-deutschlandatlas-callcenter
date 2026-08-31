@@ -351,7 +351,7 @@ function answerFor(query) {
 }
 
 // Part 1 "Verstehen": a short spoken confirmation of the understood question (varied lead-in).
-const VERSTEHEN_LEADINS = ['Verstanden — Ihre Frage lautet', 'Alles klar, Sie möchten wissen', 'Gut, Sie fragen', 'Ich habe verstanden — Sie möchten wissen', 'In Ordnung, Ihre Frage ist'];
+const VERSTEHEN_LEADINS = ['Verstanden — Ihre Frage lautet', 'Alles klar, Sie möchten wissen', 'Gut, Sie fragen', 'Ich habe verstanden — Sie möchten wissen', 'In Ordnung, Ihre Frage ist', 'Notiert — Sie interessiert', 'Gerne — Sie fragen also', 'Habe ich — Sie möchten erfahren', 'Klar, es geht Ihnen um', 'Ich sehe, Sie wollen wissen'];
 let verstehenRot = 0;
 function verstehenText(query) {
   const q = String(query || '').trim();
@@ -366,7 +366,7 @@ const SERVICE_INTROS = [
   'Hier spricht das Deutschlandatlas-Callcenter. Ich hole für Sie echte Regionaldaten aus dem Deutschlandatlas — nichts erfunden, alles direkt aus der Quelle.',
   'Guten Tag, willkommen beim Sprach-Callcenter zum Deutschlandatlas. Stellen Sie mir Ihre Frage zu einem Ort in Deutschland, ich sehe für Sie in den echten Daten nach.',
 ];
-const BRIDGE_FALLBACKS = ['Kommen wir zu Ihrer nächsten Frage.', 'Gerne sehe ich für Sie weiter nach.', 'Bleiben wir gleich dran — einen Moment, ich schaue nach.'];
+const BRIDGE_FALLBACKS = ['Kommen wir zu Ihrer nächsten Frage.', 'Gerne sehe ich für Sie weiter nach.', 'Bleiben wir gleich dran — einen Moment, ich schaue nach.', 'Sehr gern — ich prüfe das eben für Sie.', 'Gut, dann schauen wir uns das gemeinsam an.', 'Einen Augenblick, ich hole die passenden Zahlen.'];
 let introRot = 0;
 async function introBridge(context) {
   // Invariant I3: the bridge identity is decided by turnCount (how many turns were already
