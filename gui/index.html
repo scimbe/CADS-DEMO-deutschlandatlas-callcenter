@@ -314,7 +314,17 @@
   function startBridge(){
     const s=slot();
     if(nextIntro && nextIntro.audioUrl){ const n=nextIntro; nextIntro=null; fill(s, n.audioUrl); }
-    else { fetchIntro().then(intro=>{ nextIntro=null; fill(s, intro && intro.audioUrl); }); }
+    else {
+      // The bridge is a TIME-FILLER and is normally prefetched (instant). If it was NOT ready (e.g. Piper
+      // under load, or the very first turn), don't let its synth STALL the ordered queue — the already-
+      // ready Verstehen/Fun-Fact behind it would otherwise sit silent until the bridge (and thus the whole
+      // wait) finished. Fill it as soon as it arrives, but if that takes too long, skip it (fill null →
+      // pump moves on) so the ready short parts play immediately.
+      let filled=false;
+      const put=(url)=>{ if(filled)return; filled=true; nextIntro=null; fill(s, url); };
+      fetchIntro().then(intro=>put(intro && intro.audioUrl));
+      setTimeout(()=>put(null), 1800);
+    }
     turnCount++;
   }
   function fetchContext(query){ return fetch('/context',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({query})}).then(r=>r.json()).catch(()=>null); }
