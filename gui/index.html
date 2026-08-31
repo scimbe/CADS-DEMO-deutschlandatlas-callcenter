@@ -202,6 +202,14 @@
   let seq=[], seqBusy=false;
   function newTurn(){ seq=[]; seqBusy=false; speaking=false; try{player.pause();player.currentTime=0;player.onended=null;player.oncanplaythrough=null;}catch(e){} }
   function slot(){ const it={ready:false,url:null,played:false}; seq.push(it); return it; }
+  // Unlock audio within the user gesture (a click): browsers block a later play() once the
+  // click's transient activation has expired -- and our first real clip only plays after /context
+  // (a few seconds later). A silent play() on the gesture grants playback for the session.
+  let audioUnlocked=false;
+  function unlockAudio(){ if(audioUnlocked)return; audioUnlocked=true;
+    try{ player.muted=true; player.src='data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAgD4AAAB9AAACABAAZGF0YQAAAAA=';
+      const pr=player.play(); if(pr&&pr.then)pr.then(()=>{try{player.pause();player.currentTime=0;}catch(e){}player.muted=false;}).catch(()=>{player.muted=false;}); else player.muted=false;
+    }catch(e){ player.muted=false; } }
   function fill(it,url){ if(!it)return; it.ready=true; it.url=url||null; pump(); }
   function pump(){
     if(seqBusy||userPaused) return;
@@ -209,7 +217,7 @@
     if(!it){ setState('done'); speaking=false; return; }
     if(!it.ready) return;                                   // preserve order: never skip ahead of an unfilled slot
     if(!it.url){ it.played=true; pump(); return; }          // filled but silent -> skip to next
-    seqBusy=true; it.played=true; speaking=true; showCtl(); setState('speak'); replay.style.display='none';
+    seqBusy=true; it.played=true; speaking=true; try{player.muted=false;}catch(e){} showCtl(); setState('speak'); replay.style.display='none';
     player.onended=()=>{ seqBusy=false; pump(); };
     player.onerror=()=>{ seqBusy=false; pump(); };
     const start=()=>player.play().catch(()=>{ replay.style.display='inline-block'; replay.onclick=()=>{player.play().then(()=>{replay.style.display='none';}).catch(()=>{}); }; });
@@ -247,7 +255,7 @@
 
   // phase 1 - understand & guide (targeted clarifying question; speculation starts server-side)
   async function ask(){
-    const query=q.value.trim(); if(!query) return;
+    const query=q.value.trim(); if(!query) return; unlockAudio();
     go.disabled=true; q.disabled=true; reset(); newTurn();
     qEcho.innerHTML='<span>Ihre Frage:</span> <b></b>'; qEcho.querySelector('b').textContent=query;
     setState('listen'); aEl.className='a working'; aEl.textContent='Ich verstehe Ihre Frage …';
@@ -272,7 +280,7 @@
 
   // phase 2 - deliver: four ordered spoken parts (Verstehen -> Ueberbruecken -> Wussten Sie schon -> Antwort)
   async function deliver(query, isFollowup){
-    pending=null;   // a delivered answer supersedes any open clarification
+    unlockAudio(); pending=null;   // a delivered answer supersedes any open clarification
     go.disabled=true; q.disabled=true; reset(); newTurn();
     qEcho.innerHTML='<span>'+(isFollowup?'Weiter gefragt:':'Frage:')+'</span> <b></b>'; qEcho.querySelector('b').textContent=query;
     aEl.className='a working'; aEl.textContent='Ich hole die Antwort …'; setState('query'); startWait();
