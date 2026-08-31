@@ -1015,6 +1015,67 @@
         1410,
         520
       ]
+    },
+    {
+      "parameters": {
+        "content": "## Dialog State Machine  (single source of truth: gui/dialog-fsm.mjs)\n\nThe whole call-center dialogue is ONE finite-state machine. Every state\ndeclares **pre / enter / leave** (classic UML semantics):\n\n**IDLE**\n- pre: prepare the NEXT bridge (service intro on turn 0, else a context bridge)\n- enter: await caller utterance\n- leave: -\n- on utterance -> CLASSIFY\n\n**CLASSIFY**  (this node = \"Route by Dialog State\")\n- pre: carry {history, lastQuery, lastAnswer, pending, slots}\n- enter: LLM understand -> {precise, kind(neu|anschluss|klarstellung), slots, clarify, best_guess}\n- leave: merge dialogue-state slots\n- precise -> DELIVER   |   ambiguous -> CLARIFY\n\n**CLARIFY**\n- pre: synthesize the targeted clarify audio\n- enter: speak ONE clarify question + one-click bubbles\n- leave: set `pending` (next utterance = klarstellung)\n- answered -> DELIVER\n\n**DELIVER**  (the ordered 5-part answer, see the note on the pipeline)\n- pre: speculatively & in parallel: /context (Verstehen + fun fact) and /answer (pipeline)\n- enter: queue P1..P5 and play them strictly in order, each finishing before the next\n- leave: commit {lastQuery,lastAnswer,slots,history}; turnCount++; ALWAYS prepare the next bridge\n- done -> IDLE",
+        "height": 340,
+        "width": 640,
+        "color": 4
+      },
+      "name": "SM: Dialog State Machine",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        40,
+        -360
+      ],
+      "id": "sm:-dialog-state-machine"
+    },
+    {
+      "parameters": {
+        "content": "## DELIVER — the five ordered spoken parts (never interrupted)\n\n1  BRIDGE (Ueberbruecken)   plays FIRST to bridge time. turn 0 -> service intro; later -> context bridge\n2  VERSTEHEN                \"I understood: ...\" echo\n3  WUSSTEN_SIE_SCHON        Wikipedia fun fact — ALWAYS shown; spoken per toggle; LLM-independent\n4  ATLAS_ANTWORT            grounded live Deutschlandatlas answer (this pipeline)\n5  WEITERFUEHRUNG           active, varied lead-in to the next answerable question",
+        "height": 200,
+        "width": 640,
+        "color": 5
+      },
+      "name": "SM: DELIVER parts",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1500,
+        -360
+      ],
+      "id": "sm:-deliver-parts"
+    },
+    {
+      "parameters": {
+        "content": "## Invariants (asserted by gui/dialog-fsm.mjs)\n\nI1  ordered/non-interruptible: P1..P5 always in order, each to the end\nI2  bridge-first: P1 enters immediately on utterance, before understand resolves\nI3  bridge identity keyed on turnCount (service iff turnCount==0) — NEVER on last-answer success\nI4  fun fact always present as P3 (shown always; spoken per toggle; Wikipedia-sourced)\nI5  the next bridge is prepared in EVERY leave (success AND failure) -> cannot regress to the intro\nI6  the Atlas answer + all LLM calls retry transient proxy resets (ECONNRESET/5xx)",
+        "height": 200,
+        "width": 640,
+        "color": 6
+      },
+      "name": "SM: Invariants",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        2200,
+        -360
+      ],
+      "id": "sm:-invariants"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Mirror of gui/dialog-fsm.mjs — the canonical dialog state machine as data.\n// Kept in sync with the server module (GET /fsm returns the same shape).\nconst PARTS = ['BRIDGE','VERSTEHEN','WUSSTEN_SIE_SCHON','ATLAS_ANTWORT','WEITERFUEHRUNG'];\nconst KIND  = { NEU:'neu', ANSCHLUSS:'anschluss', KLARSTELLUNG:'klarstellung' };\nconst FSM = {\n  initial: 'IDLE',\n  states: {\n    IDLE:     { pre:'prepare next bridge (service intro turn 0, else context bridge)', enter:'await utterance', leave:'-', on:{ utterance:'CLASSIFY' } },\n    CLASSIFY: { pre:'carry {history,lastQuery,lastAnswer,pending,slots}', enter:'LLM understand -> {precise,kind,slots,clarify,best_guess}', leave:'merge slots', on:{ precise:'DELIVER', ambiguous:'CLARIFY' } },\n    CLARIFY:  { pre:'synthesize clarify audio', enter:'speak one clarify + bubbles', leave:'set pending', on:{ answered:'DELIVER', restated:'CLASSIFY' } },\n    DELIVER:  { pre:'parallel /context + /answer', enter:'queue P1..P5 in order', leave:'commit context; turnCount++; prepare next bridge', on:{ done:'IDLE' }, parts:PARTS },\n  },\n};\nconst INVARIANTS = [\n  'I1 ordered/non-interruptible P1..P5',\n  'I2 bridge-first (P1 before understand resolves)',\n  'I3 bridge identity keyed on turnCount, not last-answer success',\n  'I4 fun fact always present as P3',\n  'I5 next bridge prepared in every leave',\n  'I6 LLM calls retry transient proxy resets',\n];\nreturn [{ json: { parts: PARTS, kinds: KIND, fsm: FSM, invariants: INVARIANTS } }];"
+      },
+      "name": "Dialog State Machine (spec, mirror of gui/dialog-fsm.mjs)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        130,
+        470
+      ],
+      "id": "dialog-fsm-spec"
     }
   ],
   "connections": {
