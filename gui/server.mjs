@@ -67,7 +67,10 @@ function makeLimiter(max) {
   };
   return (task, priority = false) => new Promise((resolve, reject) => { (priority ? hi : lo).push({ task, resolve, reject }); pump(); });
 }
-const piperLimit = makeLimiter(Number(process.env.CC_PIPER_CONCURRENCY) || 2);   // CPU-bound TTS
+// Default 1: Piper is CPU-bound and even 2 concurrent synths saturate a 2-core host, making EACH job
+// ~10-30x slower (measured: 18-61s for 67-450 chars at cap 2). Serialising at cap 1 lets each clip
+// synth at full speed, so the caller hears each part sooner. Raise CC_PIPER_CONCURRENCY on a bigger host.
+const piperLimit = makeLimiter(Number(process.env.CC_PIPER_CONCURRENCY) || 1);   // CPU-bound TTS
 const pipeLimit = makeLimiter(Number(process.env.CC_PIPELINE_CONCURRENCY) || 3);  // pipeline runtime spawns
 
 function runPipeline(query, priority = false) {
@@ -717,20 +720,20 @@ const server = createServer(async (req, res) => {
     // part 2 "Überbrücken" — prepared in advance by the client (first turn: service intro; later: bridge)
     const b = await readBody(req);
     const text = await introBridge(b.context || {});
-    let au = null; try { au = await ttsSpeak(text, 'primary'); } catch {}
+    let au = null; try { au = await ttsSpeak(text, 'primary', false); } catch {}   // prefetch (next-turn bridge / topic-ack / greeting) -> low priority, must not slow the current answer's TTS
     return jsonRes(res, 200, { text, audioUrl: proxied(au) });
   }
   if (req.method === 'POST' && req.url === '/topicack') {
     // a "that's also an interesting question" opener, pre-synthesized so it can play the instant the
     // caller asks a NEW topic instead of the offered follow-up (client decides when to use it).
     const text = stripPronunciation(topicAckText());
-    let au = null; try { au = await ttsSpeak(text, 'primary'); } catch {}
+    let au = null; try { au = await ttsSpeak(text, 'primary', false); } catch {}   // prefetch (next-turn bridge / topic-ack / greeting) -> low priority, must not slow the current answer's TTS
     return jsonRes(res, 200, { text, audioUrl: proxied(au) });
   }
   if (req.method === 'POST' && req.url === '/greeting') {
     // #1: a short welcome, pre-synthesized so it plays instantly on the caller's first interaction.
     const text = stripPronunciation(greetingText());
-    let au = null; try { au = await ttsSpeak(text, 'primary'); } catch {}
+    let au = null; try { au = await ttsSpeak(text, 'primary', false); } catch {}   // prefetch (next-turn bridge / topic-ack / greeting) -> low priority, must not slow the current answer's TTS
     return jsonRes(res, 200, { text, audioUrl: proxied(au) });
   }
   if (req.method === 'POST' && (req.url === '/answer' || req.url === '/ask')) {
@@ -764,7 +767,7 @@ const server = createServer(async (req, res) => {
     const inviteText = validated.length ? deriveInvite(validated[0])
       : 'Möchten Sie noch etwas aus dem Deutschlandatlas wissen?';
     let inviteAudioUrl = null;
-    try { inviteAudioUrl = proxied(await ttsSpeak(inviteText, 'primary')); } catch {}
+    try { inviteAudioUrl = proxied(await ttsSpeak(inviteText, 'primary', false)); } catch {}   // P5 follow-up plays last -> low priority, never ahead of the answer's TTS
     return jsonRes(res, 200, { invite: inviteText, suggestions: validated, inviteAudioUrl });
   }
   if (req.method === 'GET' && /^\/fillers\/filler[1-9]\.wav$/.test(req.url)) {
