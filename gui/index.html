@@ -354,8 +354,7 @@
   // bridge (every later turn). That is what stops the "service intro repeats every turn" regression.
   let turnCount=0, nextIntro=null;
   function fetchIntro(){ return fetch('/intro',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({context:{turnCount,lastQuery,lastAnswer}})}).then(r=>r.json()).catch(()=>null); }
-  async function prepareNextIntro(){ nextIntro=await fetchIntro(); }   // prefetch so P1 can play instantly
-  prepareNextIntro();   // turn-0 service intro, ready before the first request
+  async function prepareNextIntro(){ nextIntro=await fetchIntro(); }   // prefetch so P1 can play instantly (fired after the greeting, see below)
 
   // #5: when the caller asks a NEW topic instead of the offered follow-up, open with a warm "that's
   // also an interesting question" ack — pre-synthesized in parallel so it plays instantly in place of
@@ -363,7 +362,6 @@
   let followupActive=false, nextTopicAck=null;
   function fetchTopicAck(){ return fetch('/topicack',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({})}).then(r=>r.json()).catch(()=>null); }
   async function prepareTopicAck(){ nextTopicAck=await fetchTopicAck(); }
-  prepareTopicAck();
 
   // #1: spoken greeting on the caller's FIRST interaction. Browsers block audio autoplay on a bare
   // page load, so we prepare the clip up front and play it the instant the user first clicks/taps —
@@ -374,7 +372,12 @@
   // guards against a double play (from the gesture and from prepareGreeting resolving).
   function playGreeting(){ if(greetPlayed) return; if(greetingClip && seq.length===0 && !(q.value && q.value.trim())){ greetPlayed=true; newTurn(); const s=slot(); fill(s, greetingClip); } }
   async function prepareGreeting(){ try{ greetingClip=(await (await fetch('/greeting',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({})})).json()).audioUrl; }catch(e){ greetingClip=null; } if(greetWanted) playGreeting(); }
-  prepareGreeting();
+  // Fire the greeting FIRST and ALONE: it's the first thing the caller hears, and all three boot
+  // prefetches share the single chanLimit=1 channel slot. When /intro + /topicack were queued ahead of
+  // it (services measured /intro done ~8s, /topicack ~14s, greeting still not started at 15s), the
+  // greeting waited ~15-25s or never arrived. Only once its clip is ready do we warm the turn-1 intro +
+  // topic-ack -- still ready well before the first answer's pipeline finishes.
+  prepareGreeting().then(() => { prepareNextIntro(); prepareTopicAck(); });
   const welcomeHintEl=document.getElementById('welcomeHint');
   function hideWelcome(){ if(welcomeHintEl) welcomeHintEl.classList.add('gone'); }
   function firstGesture(e){
