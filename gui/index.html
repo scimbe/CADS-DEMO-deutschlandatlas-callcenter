@@ -368,8 +368,12 @@
   // #1: spoken greeting on the caller's FIRST interaction. Browsers block audio autoplay on a bare
   // page load, so we prepare the clip up front and play it the instant the user first clicks/taps —
   // as close to "on load" as the autoplay policy allows. Distinct from the turn-0 service intro.
-  let greeted=false, greetingClip=null;
-  async function prepareGreeting(){ try{ greetingClip=(await (await fetch('/greeting',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({})})).json()).audioUrl; }catch(e){ greetingClip=null; } }
+  let greeted=false, greetingClip=null, greetWanted=false, greetPlayed=false;
+  // Play the greeting ONLY if we're still at a clean idle start (nothing queued, no typed question) --
+  // so a greeting that becomes ready late never talks over an already-started question. greetPlayed
+  // guards against a double play (from the gesture and from prepareGreeting resolving).
+  function playGreeting(){ if(greetPlayed) return; if(greetingClip && seq.length===0 && !(q.value && q.value.trim())){ greetPlayed=true; newTurn(); const s=slot(); fill(s, greetingClip); } }
+  async function prepareGreeting(){ try{ greetingClip=(await (await fetch('/greeting',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({})})).json()).audioUrl; }catch(e){ greetingClip=null; } if(greetWanted) playGreeting(); }
   prepareGreeting();
   const welcomeHintEl=document.getElementById('welcomeHint');
   function hideWelcome(){ if(welcomeHintEl) welcomeHintEl.classList.add('gone'); }
@@ -378,7 +382,10 @@
     unlockAudio();                                                 // satisfy autoplay within the gesture
     if(e && e.target && e.target.closest && e.target.closest('#go')) return;  // they're submitting a question -> the intro is the opener
     greeted=true; hideWelcome();
-    if(greetingClip && seq.length===0 && !(q.value && q.value.trim())){ newTurn(); const s=slot(); fill(s, greetingClip); }
+    // Bug fix (greeting race): remember the intent to greet, then play now if the clip is already
+    // synthesised, otherwise prepareGreeting() plays it the moment it resolves -- so a fast click
+    // (before /greeting returns) no longer permanently loses the greeting.
+    greetWanted=true; playGreeting();
   }
   document.addEventListener('pointerdown', firstGesture, true);
 
