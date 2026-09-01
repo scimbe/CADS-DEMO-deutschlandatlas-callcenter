@@ -107,9 +107,10 @@
 </head>
 <body>
 <div class="wrap">
-  <div class="eyebrow"><span class="dot"></span>Deutschlandatlas · Sprach-Callcenter</div>
-  <h1>Stellen Sie eine Frage — die Antwort kommt aus echten, live abgefragten Daten.</h1>
-  <p class="lede">Fragen Sie zu einem Ort in Deutschland (Kriminalität, Bildung, Beschäftigung, Wohnen …). Der Agent
+  <button id="langToggle" type="button" title="Language / Sprache" style="float:right;margin-top:2px;background:rgba(127,127,127,.14);border:1px solid rgba(127,127,127,.35);color:inherit;border-radius:8px;padding:4px 11px;font:inherit;font-size:13px;font-weight:600;letter-spacing:.03em;cursor:pointer">EN</button>
+  <div class="eyebrow"><span class="dot"></span><span data-i18n="eyebrow">Deutschlandatlas · Sprach-Callcenter</span></div>
+  <h1 data-i18n="h1">Stellen Sie eine Frage — die Antwort kommt aus echten, live abgefragten Daten.</h1>
+  <p class="lede" data-i18n="lede">Fragen Sie zu einem Ort in Deutschland (Kriminalität, Bildung, Beschäftigung, Wohnen …). Der Agent
     sucht die passende Deutschlandatlas-Tabelle, fragt sie live ab und antwortet geerdet — oder lehnt ehrlich ab.</p>
 
   <div class="stage">
@@ -117,24 +118,24 @@
       <div class="chip"><span class="p"></span><span id="stateName">Bereit</span></div>
       <div class="timer" id="timer">0,0 s</div>
       <canvas id="viz"></canvas>
-      <div class="welcomehint" id="welcomeHint">👋 Willkommen — klicken oder tippen, dann begrüße ich Sie</div>
+      <div class="welcomehint" id="welcomeHint" data-i18n="welcome">👋 Willkommen — klicken oder tippen, dann begrüße ich Sie</div>
     </div>
     <div class="ask">
-      <input type="text" id="q" placeholder="Ihre Frage, z. B. Wie hoch ist die Straftatenquote in Kiel?" autocomplete="off">
-      <button class="mic" id="mic" title="Sprechen (Deutsch)">🎙️</button>
-      <button class="primary" id="go">Fragen</button>
-      <div class="playctl" id="playctl"><button id="pauseBtn">⏸ Pause</button><button id="stopBtn">⏹ Stopp</button></div>
-      <label class="fftoggle" title="„Wussten Sie schon" nur anzeigen, nicht vor der Antwort vorlesen (dann entsteht ggf. eine kurze Pause)"><input type="checkbox" id="speakff" checked> „Wussten Sie schon" vorlesen</label>
+      <input type="text" id="q" placeholder="Ihre Frage, z. B. Wie hoch ist die Straftatenquote in Kiel?" data-i18n-ph="placeholder" autocomplete="off">
+      <button class="mic" id="mic" title="Sprechen (Deutsch)" data-i18n-title="micTitle">🎙️</button>
+      <button class="primary" id="go" data-i18n="go">Fragen</button>
+      <div class="playctl" id="playctl"><button id="pauseBtn">⏸ Pause</button><button id="stopBtn" data-i18n="stop">⏹ Stopp</button></div>
+      <label class="fftoggle" title="„Wussten Sie schon" nur anzeigen, nicht vor der Antwort vorlesen (dann entsteht ggf. eine kurze Pause)"><input type="checkbox" id="speakff" checked> <span data-i18n="ffLabel">„Wussten Sie schon" vorlesen</span></label>
     </div>
   </div>
 
   <div class="examples" id="examples"></div>
-  <button class="m-toggle" id="mToggle" aria-expanded="false">mehr anzeigen ▾</button>
+  <button class="m-toggle" id="mToggle" aria-expanded="false" data-i18n="more">mehr anzeigen ▾</button>
 
   <div class="answer">
     <div class="q" id="qEcho"></div>
-    <div class="a" id="a">Stellen Sie Ihre Frage oben.</div>
-    <button class="replayBtn" id="replay">🔊 Antwort abspielen</button>
+    <div class="a" id="a" data-i18n="aDefault">Stellen Sie Ihre Frage oben.</div>
+    <button class="replayBtn" id="replay" data-i18n="replay">🔊 Antwort abspielen</button>
     <div class="src" id="src"><span class="tick">✓ geerdet</span><span id="srcTxt"></span></div>
     <div class="funfact" id="funfact"></div>
   </div>
@@ -142,9 +143,9 @@
   <audio id="filler"></audio>
 
   <footer>
-    <div class="fl"><a class="support" href="https://scimbe.github.io/CADS-agent-marketplace-docs/how-to/install-and-customize-a-demo/" target="_blank" rel="noopener">Lokal installieren &amp; anpassen ↗</a></div>
-    <div class="fl"><a class="support" href="https://steady.page/plans/77a32d9c-c399-4ca1-9515-7a628c7a9413" target="_blank" rel="noopener">Als Mitglied unterstützen →</a><a class="support" href="https://buymeacoffee.com/bunsenbrenner" target="_blank" rel="noopener">Buy me a coffee →</a><a href="https://github.com/scimbe/CADS-Tunnel" target="_blank" rel="noopener">GitHub</a><a href="https://bunsenbrenner.org/legal-notice" target="_blank" rel="noopener">Legal Notice</a><a href="https://bunsenbrenner.org/privacy-policy" target="_blank" rel="noopener">Privacy Policy</a><a href="https://bunsenbrenner.org/terms-of-use" target="_blank" rel="noopener">Terms of Use</a></div>
-    <span>Antworten aus der Live-Deutschlandatlas-API · nichts erfunden · <a href="https://bunsenbrenner.org" target="_blank" rel="noopener">bunsenbrenner.org</a></span>
+    <div class="fl"><a class="support" href="https://scimbe.github.io/CADS-agent-marketplace-docs/how-to/install-and-customize-a-demo/" target="_blank" rel="noopener" data-i18n="footerInstall">Lokal installieren &amp; anpassen ↗</a></div>
+    <div class="fl"><a class="support" href="https://steady.page/plans/77a32d9c-c399-4ca1-9515-7a628c7a9413" target="_blank" rel="noopener" data-i18n="footerSupport">Als Mitglied unterstützen →</a><a class="support" href="https://buymeacoffee.com/bunsenbrenner" target="_blank" rel="noopener">Buy me a coffee →</a><a href="https://github.com/scimbe/CADS-Tunnel" target="_blank" rel="noopener">GitHub</a><a href="https://bunsenbrenner.org/legal-notice" target="_blank" rel="noopener">Legal Notice</a><a href="https://bunsenbrenner.org/privacy-policy" target="_blank" rel="noopener">Privacy Policy</a><a href="https://bunsenbrenner.org/terms-of-use" target="_blank" rel="noopener">Terms of Use</a></div>
+    <span><span data-i18n="footerNote">Antworten aus der Live-Deutschlandatlas-API · nichts erfunden · </span><a href="https://bunsenbrenner.org" target="_blank" rel="noopener">bunsenbrenner.org</a></span>
   </footer>
 </div>
 
@@ -157,11 +158,60 @@
   new ResizeObserver(resize).observe(canvas.parentElement); resize();
   const ST={idle:{n:'Bereit',c:'#35C2A8',b:.10},listen:{n:'Zuhören',c:'#5E8DEF',b:.5},think:{n:'Verstehen',c:'#E4B24A',b:.22},
     query:{n:'Live-Abfrage',c:'#5E8DEF',b:.3},speak:{n:'Antworten',c:'#DC8845',b:.55},done:{n:'Fertig',c:'#35C2A8',b:.12}};
+  // --- i18n: DE/EN chrome toggle. Spoken answers + Deutschlandatlas data stay German (Thorsten voice,
+  // German indicators); only the visible UI chrome switches. Example questions stay German (they are the
+  // actual queries the German-data pipeline answers). tr('lang') is the only global text switch. ---
+  const I18N={
+    de:{ eyebrow:'Deutschlandatlas · Sprach-Callcenter', h1:'Stellen Sie eine Frage — die Antwort kommt aus echten, live abgefragten Daten.',
+      lede:'Fragen Sie zu einem Ort in Deutschland (Kriminalität, Bildung, Beschäftigung, Wohnen …). Der Agent sucht die passende Deutschlandatlas-Tabelle, fragt sie live ab und antwortet geerdet — oder lehnt ehrlich ab.',
+      welcome:'👋 Willkommen — klicken oder tippen, dann begrüße ich Sie', placeholder:'Ihre Frage, z. B. Wie hoch ist die Straftatenquote in Kiel?',
+      micTitle:'Sprechen (Deutsch)', go:'Fragen', pause:'⏸ Pause', resume:'▶︎ Weiter', stop:'⏹ Stopp', ffLabel:'„Wussten Sie schon" vorlesen',
+      more:'mehr anzeigen ▾', less:'weniger anzeigen ▴', aDefault:'Stellen Sie Ihre Frage oben.', replay:'🔊 Antwort abspielen',
+      footerInstall:'Lokal installieren & anpassen ↗', footerSupport:'Als Mitglied unterstützen →', footerNote:'Antworten aus der Live-Deutschlandatlas-API · nichts erfunden · ',
+      state_idle:'Bereit', state_listen:'Zuhören', state_think:'Verstehen', state_query:'Live-Abfrage', state_speak:'Antworten', state_done:'Fertig',
+      status0:'Ich habe Ihre Frage verstanden …', status1:'Ich suche die passende Deutschlandatlas-Tabelle …', status2:'Ich frage die Live-Daten bei der amtlichen Quelle ab …', status3:'Ich prüfe die Werte und formuliere Ihre Antwort …',
+      understanding:'Ich verstehe Ihre Frage …', fetching:'Ich hole die Antwort …', processingRec:'Ich verarbeite Ihre Aufnahme …', listening:'🎙️ Ich höre zu … (zum Stoppen erneut auf 🎙️ tippen)',
+      connError:'Verbindungsfehler: ', clarify:'Können Sie Ihre Frage etwas genauer stellen?', noAnswer:'Dazu habe ich leider keine Antwort erhalten.',
+      approx:'⚠ Näherung', approxTxt:'keine exakten Daten — beste verfügbare Näherung', groundedLive:'✓ geerdet · Live-Quelle', reused:' · wiederverwendet', liveRows:' Live-Zeile(n)',
+      qYour:'Ihre Frage:', qFollow:'Weiter gefragt:', qQuestion:'Frage:', ffHeader:'💡 Wussten Sie schon?', wikiSource:'Quelle: Wikipedia', inviteFallback:'Möchten Sie noch etwas wissen?',
+      sttFail:'Ich habe leider nichts verstanden — bitte erneut auf 🎙️ tippen und sprechen, oder tippen Sie Ihre Frage.', sttError:'Spracherkennung fehlgeschlagen — bitte tippen Sie Ihre Frage.',
+      speechInput:'Spracheingabe: ', micDenied:'Bitte erlauben Sie den Mikrofon-Zugriff in Ihrem Browser.', micNotFound:'Es wurde kein Mikrofon gefunden.',
+      micUnavail:'Mikrofon nicht verfügbar. Es könnte auch am Browser liegen — unterstützt sind aktuelle Chrome, Edge, Firefox und Safari. Sie können die Frage auch tippen.',
+      micUnsupported:'Sprachaufnahme wird von diesem Browser nicht unterstützt (aktuelle Chrome, Edge, Firefox oder Safari verwenden).' },
+    en:{ eyebrow:'Deutschlandatlas · Voice Callcenter', h1:'Ask a question — the answer comes from real, live-queried data.',
+      lede:'Ask about a place in Germany (crime, education, employment, housing …). The agent finds the matching Deutschlandatlas table, queries it live and answers grounded — or honestly declines.',
+      welcome:'👋 Welcome — click or type and I will greet you', placeholder:'Your question, e.g. What is the crime rate in Kiel?',
+      micTitle:'Speak (German)', go:'Ask', pause:'⏸ Pause', resume:'▶︎ Resume', stop:'⏹ Stop', ffLabel:'Read out “Did you know”',
+      more:'show more ▾', less:'show less ▴', aDefault:'Ask your question above.', replay:'🔊 Play answer',
+      footerInstall:'Install & customize locally ↗', footerSupport:'Support as a member →', footerNote:'Answers from the live Deutschlandatlas API · nothing invented · ',
+      state_idle:'Ready', state_listen:'Listening', state_think:'Understanding', state_query:'Live query', state_speak:'Answering', state_done:'Done',
+      status0:'I understood your question …', status1:'Finding the matching Deutschlandatlas table …', status2:'Querying the live data from the official source …', status3:'Checking the values and composing your answer …',
+      understanding:'Understanding your question …', fetching:'Fetching the answer …', processingRec:'Processing your recording …', listening:'🎙️ Listening … (tap 🎙️ again to stop)',
+      connError:'Connection error: ', clarify:'Could you phrase your question a bit more precisely?', noAnswer:'Sorry, I did not get an answer for that.',
+      approx:'⚠ Approximation', approxTxt:'no exact data — best available approximation', groundedLive:'✓ grounded · live source', reused:' · reused', liveRows:' live row(s)',
+      qYour:'Your question:', qFollow:'Follow-up:', qQuestion:'Question:', ffHeader:'💡 Did you know?', wikiSource:'Source: Wikipedia', inviteFallback:'Would you like to know anything else?',
+      sttFail:'Sorry, I did not catch that — tap 🎙️ again and speak, or type your question.', sttError:'Speech recognition failed — please type your question.',
+      speechInput:'Voice input: ', micDenied:'Please allow microphone access in your browser.', micNotFound:'No microphone was found.',
+      micUnavail:'Microphone unavailable. It may also be the browser — supported are current Chrome, Edge, Firefox and Safari. You can also type your question.',
+      micUnsupported:'Voice recording is not supported by this browser (use a current Chrome, Edge, Firefox or Safari).' }
+  };
+  let lang=(()=>{ try{ return localStorage.getItem('cc_lang')==='en'?'en':'de'; }catch(e){ return 'de'; } })();
+  const tr=(k)=> (I18N[lang]&&I18N[lang][k]!=null) ? I18N[lang][k] : (I18N.de[k]!=null?I18N.de[k]:'');
+  function applyStatic(){
+    try{ document.documentElement.lang=lang;
+      document.querySelectorAll('[data-i18n]').forEach(el=>{ el.textContent=tr(el.getAttribute('data-i18n')); });
+      document.querySelectorAll('[data-i18n-ph]').forEach(el=>{ el.placeholder=tr(el.getAttribute('data-i18n-ph')); });
+      document.querySelectorAll('[data-i18n-title]').forEach(el=>{ if(!el.disabled) el.title=tr(el.getAttribute('data-i18n-title')); });
+      const lt=document.getElementById('langToggle'); if(lt) lt.textContent = (lang==='de'?'EN':'DE');
+      const sn=document.getElementById('stateName'); if(sn&&ST[state]) sn.textContent=tr('state_'+state);
+    }catch(e){}
+  }
+  function setLang(l){ lang=(l==='en')?'en':'de'; try{ localStorage.setItem('cc_lang',lang); }catch(e){} applyStatic(); try{ renderExamples(); }catch(e){} }
   let state='idle',amp=.1,col=[53,194,168],colT=[53,194,168],t=0,speaking=false;
   const N=80,ph=new Float32Array(N).map(()=>Math.random()*6.28);
   const hex=h=>[parseInt(h.slice(1,3),16),parseInt(h.slice(3,5),16),parseInt(h.slice(5,7),16)];
   const lerp=(a,b,f)=>a+(b-a)*f, mix=(a,b,f)=>a.map((x,i)=>lerp(x,b[i],f)), rgba=(c,a)=>`rgba(${c[0]|0},${c[1]|0},${c[2]|0},${a})`;
-  function setState(s){state=s;const S=ST[s];colT=hex(S.c);document.getElementById('stateName').textContent=S.n;
+  function setState(s){state=s;const S=ST[s];colT=hex(S.c);document.getElementById('stateName').textContent=tr('state_'+s);
     const chip=document.querySelector('.chip');chip.style.setProperty('--st',S.c);chip.querySelector('.p').style.background=S.c;}
   function frame(ts){t=ts/1000;const S=ST[state];let target=S.b;
     if(state==='speak'&&speaking)target=S.b+.35*(0.5+0.5*Math.sin(t*11)*Math.sin(t*6.3)+0.25*Math.sin(t*23));
@@ -210,10 +260,10 @@
     fillerTimer=setTimeout(()=>{ fillerTimer=null; if(userPaused||seqBusy)return; fillerActive=true; fillerEl.onended=()=>{ if(fillerActive&&!userPaused) playFiller(); }; playFiller(); },1200); }
   function stopFillerLoop(){ if(fillerTimer){clearTimeout(fillerTimer);fillerTimer=null;} if(!fillerActive)return; fillerActive=false; fillerEl.onended=null; stopFiller(); }
 
-  const STATUS=['Ich habe Ihre Frage verstanden …','Ich suche die passende Deutschlandatlas-Tabelle …','Ich frage die Live-Daten bei der amtlichen Quelle ab …','Ich prüfe die Werte und formuliere Ihre Antwort …'];
+  const STATUS=()=>[tr('status0'),tr('status1'),tr('status2'),tr('status3')];
   let statusTimer=null,tickTimer=null,t0=0;
-  function startWait(){let i=0;aEl.className='a working';aEl.textContent=STATUS[0];
-    statusTimer=setInterval(()=>{ if(i<STATUS.length-1){ i++; aEl.textContent=STATUS[i]; } else { clearInterval(statusTimer); } },2600);   // advance through the phases ONCE, then hold on the last (no looping)
+  function startWait(){let i=0;const S=STATUS();aEl.className='a working';aEl.textContent=S[0];
+    statusTimer=setInterval(()=>{ if(i<S.length-1){ i++; aEl.textContent=S[i]; } else { clearInterval(statusTimer); } },2600);   // advance through the phases ONCE, then hold on the last (no looping)
     t0=performance.now();timerEl.style.display='block';
     tickTimer=setInterval(()=>{timerEl.textContent=((performance.now()-t0)/1000).toFixed(1).replace('.',',')+' s';},100);}
   function stopWait(){clearInterval(statusTimer);clearInterval(tickTimer);timerEl.style.display='none';}
@@ -225,7 +275,7 @@
   const playctl=document.getElementById('playctl'),pauseBtn=document.getElementById('pauseBtn'),stopBtn=document.getElementById('stopBtn');
   let userPaused=false;
   function showCtl(){playctl.classList.add('active');}
-  function hideCtl(){playctl.classList.remove('active');userPaused=false;pauseBtn.textContent='⏸ Pause';}
+  function hideCtl(){playctl.classList.remove('active');userPaused=false;pauseBtn.textContent=tr('pause');}
 
   // Ordered sequential speech queue: a turn is spoken in FIXED order, each part ALWAYS finishing
   // before the next (never cut off): 1 Verstehen - 2 Ueberbruecken - 3 Wussten Sie schon -
@@ -279,12 +329,12 @@
     setTimeout(()=>{ if(seqBusy&&!advanced&&player.paused&&player.currentTime===0) advance(); },9000);   // hard stall-breaker
   }
   function togglePause(){
-    if(!userPaused){ userPaused=true; pauseBtn.textContent='▶︎ Weiter'; stopFillerLoop(); try{if(!player.paused)player.pause();}catch(e){} }
-    else { userPaused=false; pauseBtn.textContent='⏸ Pause';
+    if(!userPaused){ userPaused=true; pauseBtn.textContent=tr('resume'); stopFillerLoop(); try{if(!player.paused)player.pause();}catch(e){} }
+    else { userPaused=false; pauseBtn.textContent=tr('pause');
       if(player.src&&player.paused&&player.currentTime>0&&!player.ended){ player.play().catch(()=>{}); }
       else { seqBusy=false; pump(); } }
   }
-  function stopAll(){ seq.forEach(s=>s.played=true); seqBusy=false; speaking=false; userPaused=false; pauseBtn.textContent='⏸ Pause'; stopFillerLoop();
+  function stopAll(){ seq.forEach(s=>s.played=true); seqBusy=false; speaking=false; userPaused=false; pauseBtn.textContent=tr('pause'); stopFillerLoop();
     try{player.pause();player.currentTime=0;player.onended=null;}catch(e){} setState('done'); hideCtl(); }
   pauseBtn.onclick=togglePause; stopBtn.onclick=stopAll;
 
@@ -295,7 +345,7 @@
   const speakFfEl=document.getElementById('speakff');
   function speakFunfact(){ return !speakFfEl || speakFfEl.checked; }   // toggle: always SHOW the fun fact, maybe don't SPEAK it before the answer
   function showFunfact(ff){ if(!ff||!ff.text) return; ffEl.style.display='block';
-    ffEl.innerHTML='<div class="h">💡 Wussten Sie schon?</div>'+ff.text+' <a href="'+ff.url+'" target="_blank" rel="noopener">Quelle: Wikipedia</a>'; }
+    ffEl.innerHTML='<div class="h">'+tr('ffHeader')+'</div>'+ff.text+' <a href="'+ff.url+'" target="_blank" rel="noopener">'+tr('wikiSource')+'</a>'; }
   function reset(){src.style.display='none';src.classList.remove('refuse');replay.style.display='none';ffEl.style.display='none';hideCtl();}
 
   // Ueberbruecken (P1) — dialog-fsm.mjs invariants I3/I5. `turnCount` = bridges already presented this
@@ -366,8 +416,8 @@
     if(pivot && nextTopicAck && nextTopicAck.audioUrl){ const s=slot(); fill(s, nextTopicAck.audioUrl); nextTopicAck=null; turnCount++; prepareTopicAck(); }
     else startBridge();                    // Ueberbruecken plays right away -> no dead air during understand
     const ctxP=fetchContext(query);        // speculative: Verstehen + Fun-Fact compute in parallel with /understand
-    qEcho.innerHTML='<span>Ihre Frage:</span> <b></b>'; qEcho.querySelector('b').textContent=query;
-    setState('listen'); aEl.className='a working'; aEl.textContent='Ich verstehe Ihre Frage …';
+    qEcho.innerHTML='<span>'+tr('qYour')+'</span> <b></b>'; qEcho.querySelector('b').textContent=query;
+    setState('listen'); aEl.className='a working'; aEl.textContent=tr('understanding');
     setTimeout(()=>setState('think'),500);
     try{
       const sentPending=pending;
@@ -378,13 +428,13 @@
       awaitingAnswer=false; stopFillerLoop();   // a clarify question (not a long answer) is now spoken -> no more bridging
       pending={clarify:u.clarify||'', best_guess:u.best_guess||'', options:u.options||[], original:query};
       setState('idle');
-      aEl.className='a'; aEl.textContent=u.clarify||'Können Sie Ihre Frage etwas genauer stellen?';
+      aEl.className='a'; aEl.textContent=u.clarify||tr('clarify');
       if(u.clarifyAudioUrl){ const s=slot(); fill(s,u.clarifyAudioUrl); }
       const items=[]; if(u.best_guess) items.push({label:u.best_guess,best:true,onClick:()=>deliver(u.best_guess,false)});
       (u.options||[]).forEach(o=>{ if(o&&o!==u.best_guess) items.push({label:o,onClick:()=>deliver(o,false)}); });
       renderBubbles(items,'<span class="spin"></span>Wahrscheinlichste Antwort wird bereits vorbereitet …');
       q.value=''; q.focus();
-    }catch(e){awaitingAnswer=false;stopFillerLoop();go.disabled=false;q.disabled=false;stopWait();aEl.className='a';aEl.textContent='Verbindungsfehler: '+e.message;setState('done');}
+    }catch(e){awaitingAnswer=false;stopFillerLoop();go.disabled=false;q.disabled=false;stopWait();aEl.className='a';aEl.textContent=tr('connError')+e.message;setState('done');}
   }
 
   // phase 2 - deliver: Ueberbruecken (already playing) -> Verstehen -> Wussten Sie schon -> Antwort, all in order
@@ -394,8 +444,8 @@
     awaitingAnswer=true;                                  // fillers bridge until the answer slot is filled
     go.disabled=true; q.disabled=true;
     if(!opts.continued){ reset(); newTurn(); startBridge(); }   // fresh turn (bubble click): bridge plays immediately
-    qEcho.innerHTML='<span>'+(isFollowup?'Weiter gefragt:':'Frage:')+'</span> <b></b>'; qEcho.querySelector('b').textContent=query;
-    aEl.className='a working'; aEl.textContent='Ich hole die Antwort …'; setState('query'); startWait();
+    qEcho.innerHTML='<span>'+(isFollowup?tr('qFollow'):tr('qQuestion'))+'</span> <b></b>'; qEcho.querySelector('b').textContent=query;
+    aEl.className='a working'; aEl.textContent=tr('fetching'); setState('query'); startWait();
     const sV=slot(), sF=slot(), sA=slot();      // Verstehen, Wussten Sie schon, Antwort (Ueberbruecken already queued)
     const ctxP=opts.ctxP||fetchContext(query);
     ctxP.then(c=>{
@@ -407,13 +457,13 @@
     try{
       const d=await (await fetch('/answer',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({query})})).json();
       stopWait();
-      const ans=d.answer||d.error||'Dazu habe ich leider keine Antwort erhalten.';
+      const ans=d.answer||d.error||tr('noAnswer');
       const matched=d.meta?(d.meta.has_real_data!==false && !!d.meta.table):true;
       type(aEl,ans,()=>{
         if(d.meta){const m=d.meta;src.style.display='flex';
-          if(!matched){src.classList.add('refuse');src.querySelector('.tick').textContent='⚠ Näherung';srcTxt.textContent='keine exakten Daten — beste verfügbare Näherung';}
-          else{src.querySelector('.tick').textContent='✓ geerdet · Live-Quelle'+(d.reused?' · wiederverwendet':'');
-            srcTxt.innerHTML='<span class="pill">'+(m.table||'—')+'</span> <span class="pill">'+(m.place_resolved||m.place_name_requested||'')+'</span> <span class="pill">'+(m.live_rows_used||0)+' Live-Zeile(n)</span>';}
+          if(!matched){src.classList.add('refuse');src.querySelector('.tick').textContent=tr('approx');srcTxt.textContent=tr('approxTxt');}
+          else{src.querySelector('.tick').textContent=tr('groundedLive')+(d.reused?tr('reused'):'');
+            srcTxt.innerHTML='<span class="pill">'+(m.table||'—')+'</span> <span class="pill">'+(m.place_resolved||m.place_name_requested||'')+'</span> <span class="pill">'+(m.live_rows_used||0)+tr('liveRows')+'</span>';}
         }
       });
       awaitingAnswer=false;   // the answer slot is now in the queue -> normal ordered pump takes over
@@ -424,7 +474,7 @@
       go.disabled=false; q.disabled=false;
       const sI=slot();
       doFollowup(query, ans).then(u=>fill(sI, u));
-    }catch(e){awaitingAnswer=false;stopFillerLoop();stopWait();aEl.className='a';aEl.textContent='Verbindungsfehler: '+e.message;setState('done');go.disabled=false;q.disabled=false;fill(sV,null);fill(sF,null);fill(sA,null);}
+    }catch(e){awaitingAnswer=false;stopFillerLoop();stopWait();aEl.className='a';aEl.textContent=tr('connError')+e.message;setState('done');go.disabled=false;q.disabled=false;fill(sV,null);fill(sF,null);fill(sA,null);}
     finally{ prepareNextIntro(); prepareTopicAck(); }   // I5: refresh next bridge + new-topic ack on EVERY path
   }
 
@@ -449,7 +499,7 @@
           {label:'✓ Ja',best:true,onClick:()=>deliver(sug[0],true,{continued:true,ctxP:ctxP0})},
           ...sug.slice(1).map(s=>({label:s,onClick:()=>deliver(s,true,{continued:true})}))
         ];
-        renderBubbles(items,'💬 '+(f.invite||'Möchten Sie noch etwas wissen?'));
+        renderBubbles(items,'💬 '+(f.invite||tr('inviteFallback')));
         followupActive=true;   // a follow-up is now on offer -> a typed NEW question triggers the topic-ack
       } else { renderExamples(); followupActive=false; }
       return f.inviteAudioUrl||null;
@@ -468,27 +518,32 @@
       mediaRec.ondataavailable=e=>{if(e.data&&e.data.size)recChunks.push(e.data);};
       mediaRec.onstop=async ()=>{
         recording=false; mic.classList.remove('on'); try{recStream.getTracks().forEach(t=>t.stop());}catch(e){}
-        setState('think'); aEl.className='a working'; aEl.textContent='Ich verarbeite Ihre Aufnahme …';
+        setState('think'); aEl.className='a working'; aEl.textContent=tr('processingRec');
         try{
           const blob=new Blob(recChunks,{type:(mediaRec&&mediaRec.mimeType)||'audio/webm'});
           const d=await (await fetch('/stt',{method:'POST',headers:{'content-type':blob.type},body:blob})).json();
           if(d.text && d.text.trim()){ q.value=d.text.trim(); ask(); }
-          else { aEl.className='a'; aEl.textContent='Ich habe leider nichts verstanden — bitte erneut auf 🎙️ tippen und sprechen, oder tippen Sie Ihre Frage.'; setState('idle'); }
-        }catch(e){ aEl.className='a'; aEl.textContent='Spracherkennung fehlgeschlagen — bitte tippen Sie Ihre Frage.'; setState('idle'); }
+          else { aEl.className='a'; aEl.textContent=tr('sttFail'); setState('idle'); }
+        }catch(e){ aEl.className='a'; aEl.textContent=tr('sttError'); setState('idle'); }
       };
       mediaRec.start(); recording=true; mic.classList.add('on'); setState('listen');
-      aEl.className='a working'; aEl.textContent='🎙️ Ich höre zu … (zum Stoppen erneut auf 🎙️ tippen)';
+      aEl.className='a working'; aEl.textContent=tr('listening');
     }catch(err){
       mic.classList.remove('on');
-      const m = err&&err.name==='NotAllowedError' ? 'Bitte erlauben Sie den Mikrofon-Zugriff in Ihrem Browser.'
-              : err&&err.name==='NotFoundError' ? 'Es wurde kein Mikrofon gefunden.'
-              : 'Mikrofon nicht verfügbar. Es könnte auch am Browser liegen — unterstützt sind aktuelle Chrome, Edge, Firefox und Safari. Sie können die Frage auch tippen.';
-      aEl.className='a'; aEl.textContent='Spracheingabe: '+m;
+      const m = err&&err.name==='NotAllowedError' ? tr('micDenied')
+              : err&&err.name==='NotFoundError' ? tr('micNotFound')
+              : tr('micUnavail');
+      aEl.className='a'; aEl.textContent=tr('speechInput')+m;
     }
   }
   if(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder){
     mic.onclick=()=>{ if(recording){ try{mediaRec&&mediaRec.stop();}catch(e){} } else { stopAll(); startRec(); } };
-  } else { mic.disabled=true; mic.title='Sprachaufnahme wird von diesem Browser nicht unterstützt (aktuelle Chrome, Edge, Firefox oder Safari verwenden).'; }
+  } else { mic.disabled=true; mic.title=tr('micUnsupported'); }
+  // i18n: apply the persisted language to all chrome, wire the DE/EN toggle, and expose t() to the
+  // separate mobile-toggle script below.
+  try{ window.ccT=tr; window.ccLang=()=>lang; }catch(e){}
+  applyStatic();
+  { const lt=document.getElementById('langToggle'); if(lt) lt.onclick=()=>setLang(lang==='de'?'en':'de'); }
 })();
 </script>
 <script>
@@ -496,7 +551,7 @@
   (function(){var t=document.getElementById('mToggle');if(!t)return;
     t.addEventListener('click',function(){var o=document.body.classList.toggle('m-open');
       t.setAttribute('aria-expanded',o?'true':'false');
-      t.textContent=o?'weniger anzeigen ▴':'mehr anzeigen ▾';});})();
+      t.textContent = window.ccT ? window.ccT(o?'less':'more') : (o?'weniger anzeigen ▴':'mehr anzeigen ▾');});})();
 </script>
 </body>
 </html>
