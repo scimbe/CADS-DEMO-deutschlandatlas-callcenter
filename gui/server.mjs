@@ -186,6 +186,25 @@ function ttsChannel(text, voice = 'primary') {
   });
 }
 
+// A channel clip's https URL is in-memory on llm2's side with a ~15-min TTL, so a PREFETCHED/warmed
+// clip (intro/greeting/topic-ack/invite) played later would 404. Fetch the bytes IMMEDIATELY on
+// receipt and cache them under our own /tts/ dir, returning a same-origin /tts/<id>.wav path -- that
+// decouples playback from the channel TTL. On any fetch failure, fall back to the original channel URL
+// (still works if the clip is played promptly). Reuses the Piper TTS_DIR + its capped pruning.
+async function localizeChannelClip(url) {
+  try {
+    const resp = await fetch(url);
+    if (!resp || !resp.ok) return url;
+    const buf = Buffer.from(await resp.arrayBuffer());
+    if (!buf.length) return url;
+    try { mkdirSync(TTS_DIR, { recursive: true }); } catch {}
+    const id = 'ch-' + process.pid + '-' + (ttsSeq++);
+    await writeFile(join(TTS_DIR, id + '.wav'), buf);
+    pruneTtsDir();
+    return '/tts/' + id + '.wav';
+  } catch { return url; }
+}
+
 function ttsSpeak(text, voice = 'primary', priority = true) {
   text = stripPronunciation(text);
   if (process.env.CC_TTS !== '1') return Promise.resolve(null);
@@ -200,7 +219,7 @@ function ttsSpeak(text, voice = 'primary', priority = true) {
   if (channelReady) {
     // serialise channel calls (chanLimit=1) so verstehen/funfact/answer don't thrash llm2's single-slot
     // serve; the user-facing answer (priority=true) still jumps ahead of any low-priority prefetch.
-    return chanLimit(() => ttsChannel(text, voice), priority).then((url) => (url || (piperReady ? ttsLocalPiper(text, priority) : null)));
+    return chanLimit(() => ttsChannel(text, voice), priority).then((url) => (url ? localizeChannelClip(url) : (piperReady ? ttsLocalPiper(text, priority) : null)));
   }
   if (piperReady) return ttsLocalPiper(text, priority);
   return Promise.resolve(null);
