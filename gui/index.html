@@ -437,9 +437,17 @@
         // Follow-up is phrased as a yes-question (see deriveInvite); we offer "Ja" plus concrete
         // alternatives, but deliberately NO "Nein" option — declining just means asking something new,
         // which the input field always allows. (operator: der Nutzer soll nur mit "ja" antworten können.)
+        // Bug#2 fix: pre-produce Verstehen + "Wussten Sie schon" for the MOST LIKELY follow-up NOW,
+        // while the caller is still listening to the current answer / deciding -- so a "Ja" plays it
+        // instantly instead of computing the Wikipedia fun fact + TTS reactively at click time.
+        const ctxP0=fetchContext(sug[0]);
         const items=[
-          {label:'✓ Ja',best:true,onClick:()=>deliver(sug[0],true)},
-          ...sug.slice(1).map(s=>({label:s,onClick:()=>deliver(s,true)}))
+          // Bug#1 fix: a "Ja" (and every offered follow-up) is a CONTINUATION, not a fresh turn --
+          // pass continued:true so deliver() skips reset()/newTurn()/startBridge(). That means no
+          // replayed bridge intro and no cutting the still-playing invite; the pre-produced ctxP0
+          // feeds the "Ja" path so Verstehen + Wussten-Sie-schon are ready the instant it's clicked.
+          {label:'✓ Ja',best:true,onClick:()=>deliver(sug[0],true,{continued:true,ctxP:ctxP0})},
+          ...sug.slice(1).map(s=>({label:s,onClick:()=>deliver(s,true,{continued:true})}))
         ];
         renderBubbles(items,'💬 '+(f.invite||'Möchten Sie noch etwas wissen?'));
         followupActive=true;   // a follow-up is now on offer -> a typed NEW question triggers the topic-ack
