@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Deutschlandatlas Callcenter</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%20100%20100'%3E%3Ctext%20y='.9em'%20font-size='88'%3E📞%3C/text%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=Public+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
@@ -125,7 +126,7 @@
       <button class="mic" id="mic" title="Sprechen (Deutsch)" data-i18n-title="micTitle">🎙️</button>
       <button class="primary" id="go" data-i18n="go">Fragen</button>
       <div class="playctl" id="playctl"><button id="pauseBtn">⏸ Pause</button><button id="stopBtn" data-i18n="stop">⏹ Stopp</button></div>
-      <label class="fftoggle" title="„Wussten Sie schon" nur anzeigen, nicht vor der Antwort vorlesen (dann entsteht ggf. eine kurze Pause)"><input type="checkbox" id="speakff" checked> <span data-i18n="ffLabel">„Wussten Sie schon" vorlesen</span></label>
+      <label class="fftoggle" title="„Wussten Sie schon" nur anzeigen, nicht vor der Antwort vorlesen (dann entsteht ggf. eine kurze Pause)" data-i18n-title="ffTitle"><input type="checkbox" id="speakff" checked> <span data-i18n="ffLabel">„Wussten Sie schon" vorlesen</span></label>
     </div>
   </div>
 
@@ -165,7 +166,7 @@
     de:{ eyebrow:'Deutschlandatlas · Sprach-Callcenter', h1:'Stellen Sie eine Frage — die Antwort kommt aus echten, live abgefragten Daten.',
       lede:'Fragen Sie zu einem Ort in Deutschland (Kriminalität, Bildung, Beschäftigung, Wohnen …). Der Agent sucht die passende Deutschlandatlas-Tabelle, fragt sie live ab und antwortet geerdet — oder lehnt ehrlich ab.',
       welcome:'👋 Willkommen — klicken oder tippen, dann begrüße ich Sie', placeholder:'Ihre Frage, z. B. Wie hoch ist die Straftatenquote in Kiel?',
-      micTitle:'Sprechen (Deutsch)', go:'Fragen', pause:'⏸ Pause', resume:'▶︎ Weiter', stop:'⏹ Stopp', ffLabel:'„Wussten Sie schon" vorlesen',
+      micTitle:'Sprechen (Deutsch)', go:'Fragen', pause:'⏸ Pause', resume:'▶︎ Weiter', stop:'⏹ Stopp', ffLabel:'„Wussten Sie schon" vorlesen', ffTitle:'„Wussten Sie schon" nur anzeigen, nicht vor der Antwort vorlesen (dann entsteht ggf. eine kurze Pause)',
       more:'mehr anzeigen ▾', less:'weniger anzeigen ▴', aDefault:'Stellen Sie Ihre Frage oben.', replay:'🔊 Antwort abspielen',
       footerInstall:'Lokal installieren & anpassen ↗', footerSupport:'Als Mitglied unterstützen →', footerNote:'Antworten aus der Live-Deutschlandatlas-API · nichts erfunden · ',
       state_idle:'Bereit', state_listen:'Zuhören', state_think:'Verstehen', state_query:'Live-Abfrage', state_speak:'Antworten', state_done:'Fertig',
@@ -181,7 +182,7 @@
     en:{ eyebrow:'Deutschlandatlas · Voice Callcenter', h1:'Ask a question — the answer comes from real, live-queried data.',
       lede:'Ask about a place in Germany (crime, education, employment, housing …). The agent finds the matching Deutschlandatlas table, queries it live and answers grounded — or honestly declines.',
       welcome:'👋 Welcome — click or type and I will greet you', placeholder:'Your question, e.g. What is the crime rate in Kiel?',
-      micTitle:'Speak (German)', go:'Ask', pause:'⏸ Pause', resume:'▶︎ Resume', stop:'⏹ Stop', ffLabel:'Read out “Did you know”',
+      micTitle:'Speak (German)', go:'Ask', pause:'⏸ Pause', resume:'▶︎ Resume', stop:'⏹ Stop', ffLabel:'Read out “Did you know”', ffTitle:'Only show “Did you know”, do not read it out before the answer (may cause a short pause)',
       more:'show more ▾', less:'show less ▴', aDefault:'Ask your question above.', replay:'🔊 Play answer',
       footerInstall:'Install & customize locally ↗', footerSupport:'Support as a member →', footerNote:'Answers from the live Deutschlandatlas API · nothing invented · ',
       state_idle:'Ready', state_listen:'Listening', state_think:'Understanding', state_query:'Live query', state_speak:'Answering', state_done:'Done',
