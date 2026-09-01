@@ -456,8 +456,12 @@ function answerFor(query, priority = false) {
       answer = rawAnswer ? await narrate(rawAnswer, 'answer') : null;   // narrative style, number-guarded
       if (ok && answer && meta && meta.table && meta.has_real_data !== false) diskPut(key, { answer, meta });
     }
-    let au = null; if (answer) { try { au = await ttsSpeak(answer, 'primary', priority); } catch {} }
-    return { ok, answer, meta, audioUrl: proxied(au), reused, err };
+    // NO TTS here: answerFor warms DATA only. Audio is synthesized ON-DEMAND by the delivering route
+    // (/answer) for the ONE real answer. Speculation fires swapCityFollowups -> 3-9 answerFor calls per
+    // turn; synthesizing their audio flooded the channel with throwaway TTS calls (self-inflicted
+    // contention: 6s -> 14s roundtrips + spurious Piper fallbacks). Warming the pipeline/narration is
+    // enough -- a confirmed query then reuses the cached data and pays only its own single TTS.
+    return { ok, answer, meta, audioUrl: null, reused, err };
   })();
   specCache.set(key, promise);
   // cache only successes in memory: drop failed/empty runs so transient flakiness can be retried
@@ -812,13 +816,18 @@ const server = createServer(async (req, res) => {
     const query = ((await readBody(req)).query || '').toString().slice(0, 300);
     if (!query.trim()) return jsonRes(res, 400, { error: 'empty query' });
     const r = await answerFor(query, true);   // user-facing -> priority over any background speculation
+    // Synthesize the atlas-answer audio ON-DEMAND, only for this one real delivered answer (speculation
+    // warmed DATA only). The real answer's TTS thus gets the channel to itself instead of queueing
+    // behind 3-9 throwaway speculative synths.
+    let audioUrl = null;
+    if (r.ok && r.answer) { try { audioUrl = proxied(await ttsSpeak(r.answer, 'primary', true)); } catch {} }
     trace('answer', { query, ok: r.ok, table: r.meta && r.meta.table, has_real_data: r.meta && r.meta.has_real_data, rows: r.meta && r.meta.live_rows_used, reused: r.reused, err: r.err });
     // warm follow-up candidates in the background so /followup can validate them from cache (some cities have no data)
     if (r.ok && r.meta && r.meta.table && r.meta.has_real_data !== false) {
       const place = placeFromQuery(query) || r.meta.place_name_requested || r.meta.place_resolved || '';
-      swapCityFollowups(query, place, 3).forEach((s) => { answerFor(s, false); });   // fire-and-forget speculation (low priority, capped)
+      swapCityFollowups(query, place, 3).forEach((s) => { answerFor(s, false); });   // fire-and-forget DATA speculation (no TTS)
     }
-    return jsonRes(res, r.ok ? 200 : 502, { query, ...r });
+    return jsonRes(res, r.ok ? 200 : 502, { query, ...r, audioUrl });
   }
   if (req.method === 'POST' && req.url === '/followup') {
     const b = await readBody(req);
