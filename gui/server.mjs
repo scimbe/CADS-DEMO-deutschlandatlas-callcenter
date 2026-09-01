@@ -20,6 +20,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, unlink
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { randomUUID } from 'node:crypto';
 import FSM_SPEC, { bridgeKind, describe as describeFsm } from './dialog-fsm.mjs';
 
 const __dir = dirname(fileURLToPath(import.meta.url));
@@ -271,6 +272,76 @@ async function transcribe(buf) {
     return (w.out || '').replace(/\[[0-9:.\s>\-]+\]/g, '').replace(/\s+/g, ' ').trim();
   } catch { return ''; }
   finally { rm(inp, { force: true }).catch(() => {}); rm(wav, { force: true }).catch(() => {}); }
+}
+
+// --- STT via the llm2 `speech_to_text` channel (operator directive: all heavy compute off this host,
+// same channel bd72dd51 as audio_generation, one grant covers both -- only CT_CHANNEL_CALL_SERVICE
+// differs). Structurally different from TTS: the service takes an https audio_url (it downloads the
+// file itself), not an inline payload -- so the mic audio must first be reachable under our OWN public
+// origin. We normalize to 16kHz mono wav, host it briefly, hand the URL to the channel, then evict it.
+// Local whisper.cpp stays as the runtime fallback (channel failure -> never silent). Gated on
+// CC_STT_CHANNEL=1 so it can be rolled out independently of the (already live) TTS channel. ---
+const STT_BLOB_DIR = join(tmpdir(), 'cc-stt-blob');
+try { mkdirSync(STT_BLOB_DIR, { recursive: true }); } catch {}
+const sttBlobs = new Map();  // id -> local wav path (only ids in here are served by /stt-blob)
+async function toWav16k(buf) {
+  const base = join(tmpdir(), 'cc-sttc-' + process.pid + '-' + (sttSeq++));
+  const inp = base + '.in', wav = base + '.wav';
+  try {
+    await writeFile(inp, buf);
+    if ((await run('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-i', inp, '-ar', '16000', '-ac', '1', wav, '-y'])).code !== 0) return null;
+    return await readFile(wav);
+  } catch { return null; }
+  finally { rm(inp, { force: true }).catch(() => {}); rm(wav, { force: true }).catch(() => {}); }
+}
+async function hostSttBlob(wav, publicBase) {
+  const id = randomUUID().replace(/-/g, '');
+  const p = join(STT_BLOB_DIR, id + '.wav');
+  await writeFile(p, wav);
+  sttBlobs.set(id, p);
+  const t = setTimeout(() => { sttBlobs.delete(id); rm(p, { force: true }).catch(() => {}); }, 60000);  // backstop TTL
+  if (t.unref) t.unref();
+  return { id, url: publicBase.replace(/\/$/, '') + '/stt-blob/' + id + '.wav' };
+}
+function evictSttBlob(id) { const p = sttBlobs.get(id); if (p) { sttBlobs.delete(id); rm(p, { force: true }).catch(() => {}); } }
+// One speech_to_text call over the channel. The WHOLE stdout is the plain-text transcription
+// (ct-agent's own status/log lines go to stderr, stripped by 2>/dev/null). Returns null on an
+// ERROR:/empty result so the caller falls back to local whisper.
+function sttChannel(audioUrl, lang = 'de') {
+  return new Promise((resolve) => {
+    const payload = JSON.stringify({ audio_url: audioUrl, lang });
+    const p = spawn('bash', ['-c',
+      `set -a; source "$CT_RELAY_ENV"; set +a; printf '%s' '${payload.replace(/'/g, "'\\''")}' | ` +
+      `CT_CHANNEL_ROLE=initiate CT_CHANNEL_CALL_SERVICE=speech_to_text CT_CHANNEL_CALL_PERSISTENT=0 CT_CHANNEL_RELAY_ONLY=1 ` +
+      `CT_CHANNEL_ID="${process.env.CT_AUDIO_CHANNEL_ID}" CT_CHANNEL_GRANT="$CT_CHANNEL_GRANT_2E" CT_CHANNEL_HOLDER_KEY="$CT_CHANNEL_HOLDER_KEY" CT_CHANNEL_NOISE_KEY="$CT_CHANNEL_NOISE_KEY" ` +
+      `CT_CHANNEL_FRONT_DOOR=bunsenbrenner.org:443 CT_CHANNEL_FRONT_DOOR_CERT="$CT_CHANNEL_FRONT_DOOR_CERT" CT_CHANNEL_FRONT_DOOR_ONLY=1 ` +
+      `CT_CHANNEL_BROKER=bunsenbrenner.org:4435 CT_CHANNEL_RELAY=bunsenbrenner.org:4436 "$CT_AGENT_BIN" channel 2>/dev/null`],
+      { env: process.env });
+    let out = '', done = false;
+    const finish = (t) => { if (done) return; done = true; clearTimeout(timer); try { p.kill('SIGKILL'); } catch {} resolve(t); };
+    const timer = setTimeout(() => finish(null), Number(process.env.CC_CHANNEL_TIMEOUT_MS) || 30000);
+    p.stdout.on('data', (d) => (out += d));
+    p.on('close', () => { const t = (out || '').replace(/\s+/g, ' ').trim(); finish(t && !/^ERROR:/i.test(t) ? t : null); });
+    p.on('error', () => finish(null));
+  });
+}
+// CHANNEL-FIRST STT with local whisper fallback (mirrors ttsSpeak). publicBase = the origin llm2 can
+// fetch the hosted blob from (derived from the request Host, overridable via CC_PUBLIC_BASE).
+async function sttSpeak(buf, publicBase) {
+  if (!buf || !buf.length) return '';
+  const channelReady = process.env.CC_STT_CHANNEL === '1' && process.env.CT_AGENT_BIN && process.env.CT_RELAY_ENV && process.env.CT_AUDIO_CHANNEL_ID && publicBase;
+  if (channelReady) {
+    const wav = await toWav16k(buf);
+    if (wav) {
+      let id = null;
+      try { const h = await hostSttBlob(wav, publicBase); id = h.id; const t = await sttChannel(h.url, 'de'); if (t) return t; }
+      catch {}
+      finally { if (id) evictSttBlob(id); }
+    }
+    // any channel failure falls through to local whisper below (never silent)
+  }
+  if (process.env.CC_WHISPER_MODEL) return transcribe(buf);
+  return '';
 }
 
 // --- optional, VERBATIM Wikipedia fun fact for the place, fetched IN PARALLEL with the atlas ---
@@ -695,7 +766,8 @@ const server = createServer(async (req, res) => {
   if (req.method === 'POST' && req.url === '/stt') {
     const chunks = [];
     for await (const c of req) chunks.push(c);
-    const text = await transcribe(Buffer.concat(chunks));
+    const base = process.env.CC_PUBLIC_BASE || (req.headers.host ? 'https://' + req.headers.host : null);
+    const text = await sttSpeak(Buffer.concat(chunks), base);
     return jsonRes(res, 200, { text });
   }
   if (req.method === 'POST' && req.url === '/context') {
@@ -778,6 +850,16 @@ const server = createServer(async (req, res) => {
   if (req.method === 'GET' && /^\/tts\/[\w.-]+\.wav$/.test(req.url)) {
     try { const buf = await readFile(join(TTS_DIR, req.url.replace('/tts/', ''))); res.writeHead(200, { 'content-type': 'audio/wav', 'cache-control': 'no-store' }); res.end(buf); }
     catch { res.writeHead(404); res.end('no tts'); }
+    return;
+  }
+  // Short-lived mic-audio blob for the speech_to_text channel (llm2 downloads it by this URL). Only
+  // ids currently in sttBlobs are served (no path traversal), and each is evicted right after its
+  // channel call resolves, with a 60s backstop TTL.
+  if (req.method === 'GET' && /^\/stt-blob\/[a-f0-9]{32}\.wav$/.test(req.url)) {
+    const p = sttBlobs.get(req.url.replace('/stt-blob/', '').replace('.wav', ''));
+    if (!p) { res.writeHead(404); res.end('no blob'); return; }
+    try { const buf = await readFile(p); res.writeHead(200, { 'content-type': 'audio/wav', 'cache-control': 'no-store' }); res.end(buf); }
+    catch { res.writeHead(404); res.end('no blob'); }
     return;
   }
   if (req.method === 'GET' && req.url.startsWith('/audio?')) {
