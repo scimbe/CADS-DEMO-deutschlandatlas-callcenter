@@ -73,6 +73,13 @@ function makeLimiter(max) {
 // synth at full speed, so the caller hears each part sooner. Raise CC_PIPER_CONCURRENCY on a bigger host.
 const piperLimit = makeLimiter(Number(process.env.CC_PIPER_CONCURRENCY) || 1);   // CPU-bound TTS
 const pipeLimit = makeLimiter(Number(process.env.CC_PIPELINE_CONCURRENCY) || 3);  // pipeline runtime spawns
+// The llm2 audio_generation channel is a SINGLE-SLOT serve (one parked accept leg at a time). A real
+// turn fires 3 channel calls near-simultaneously -- verstehen + funfact (/context) and the answer
+// (/answer) -- which, unserialised, thrash the broker's park/re-park cycle: each call waits for the
+// serve to re-park, so 3 concurrent ~6s calls balloon to ~80s AND verstehen/funfact often exceed the
+// per-call timeout and come back null (never play). Serialising channel calls to 1 makes them run
+// back-to-back (~6s each, in play order) with no thrash. Env-tunable if llm2 ever gets multi-slot.
+const chanLimit = makeLimiter(Number(process.env.CC_CHANNEL_CONCURRENCY) || 1);
 
 function runPipeline(query, priority = false) {
   return pipeLimit(() => _runPipelineNow(query), priority);
@@ -191,7 +198,9 @@ function ttsSpeak(text, voice = 'primary', priority = true) {
   const channelReady = process.env.CT_AGENT_BIN && process.env.CT_RELAY_ENV && process.env.CT_AUDIO_CHANNEL_ID;
   const piperReady = process.env.CC_PIPER_BIN && process.env.CC_PIPER_MODEL;
   if (channelReady) {
-    return ttsChannel(text, voice).then((url) => (url || (piperReady ? ttsLocalPiper(text, priority) : null)));
+    // serialise channel calls (chanLimit=1) so verstehen/funfact/answer don't thrash llm2's single-slot
+    // serve; the user-facing answer (priority=true) still jumps ahead of any low-priority prefetch.
+    return chanLimit(() => ttsChannel(text, voice), priority).then((url) => (url || (piperReady ? ttsLocalPiper(text, priority) : null)));
   }
   if (piperReady) return ttsLocalPiper(text, priority);
   return Promise.resolve(null);
