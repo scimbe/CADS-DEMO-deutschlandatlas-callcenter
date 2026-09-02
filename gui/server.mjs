@@ -220,7 +220,7 @@ function streamChannelClip(url) {
   return '/tts-stream/' + id;
 }
 
-function ttsSpeak(text, voice = 'primary', priority = true, forceStream = false) {
+function ttsSpeak(text, voice = 'primary', priority = true) {
   text = stripPronunciation(text);
   if (process.env.CC_TTS !== '1') return Promise.resolve(null);
   // Production voice = the llm2 agent `audio_generation` channel (operator directive), CHANNEL-FIRST.
@@ -234,7 +234,7 @@ function ttsSpeak(text, voice = 'primary', priority = true, forceStream = false)
   if (channelReady) {
     // serialise channel calls (chanLimit=1) so verstehen/funfact/answer don't thrash llm2's single-slot
     // serve; the user-facing answer (priority=true) still jumps ahead of any low-priority prefetch.
-    return chanLimit(() => ttsChannel(text, voice), priority).then((url) => (url ? ((process.env.CC_TTS_STREAM === '1' && (priority || forceStream)) ? streamChannelClip(url) : localizeChannelClip(url)) : (piperReady ? ttsLocalPiper(text, priority) : null)));
+    return chanLimit(() => ttsChannel(text, voice), priority).then((url) => (url ? ((process.env.CC_TTS_STREAM === '1' && priority) ? streamChannelClip(url) : localizeChannelClip(url)) : (piperReady ? ttsLocalPiper(text, priority) : null)));
   }
   if (piperReady) return ttsLocalPiper(text, priority);
   return Promise.resolve(null);
@@ -852,7 +852,7 @@ const server = createServer(async (req, res) => {
   if (req.method === 'POST' && req.url === '/greeting') {
     // #1: a short welcome, pre-synthesized so it plays instantly on the caller's first interaction.
     const text = stripPronunciation(greetingText());
-    let au = null; try { au = await ttsSpeak(text, 'primary', false, true); } catch {}   // greeting = logo->first ton: force stream (stays priority=false, doesn't jump ahead of answer TTS)
+    let au = null; try { au = await ttsSpeak(text, 'primary', false); } catch {}   // prefetch (next-turn bridge / topic-ack / greeting) -> low priority, must not slow the current answer's TTS
     return jsonRes(res, 200, { text, audioUrl: proxied(au) });
   }
   if (req.method === 'POST' && (req.url === '/answer' || req.url === '/ask')) {
