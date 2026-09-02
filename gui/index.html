@@ -172,7 +172,7 @@
       state_idle:'Bereit', state_listen:'Zuhören', state_think:'Verstehen', state_query:'Live-Abfrage', state_speak:'Antworten', state_done:'Fertig',
       status0:'Ich habe Ihre Frage verstanden …', status1:'Ich suche die passende Deutschlandatlas-Tabelle …', status2:'Ich frage die Live-Daten bei der amtlichen Quelle ab …', status3:'Ich prüfe die Werte und formuliere Ihre Antwort …',
       understanding:'Ich verstehe Ihre Frage …', fetching:'Ich hole die Antwort …', processingRec:'Ich verarbeite Ihre Aufnahme …', listening:'🎙️ Ich höre zu … (zum Stoppen erneut auf 🎙️ tippen)',
-      connError:'Verbindungsfehler: ', clarify:'Können Sie Ihre Frage etwas genauer stellen?', noAnswer:'Dazu habe ich leider keine Antwort erhalten.',
+      connError:'Verbindungsfehler: ', busy:'Gerade ist viel los — bitte stellen Sie Ihre Frage gleich noch einmal.', micUnclear:'Ich habe Sie leider nicht verstanden — bitte sprechen Sie noch einmal.', clarify:'Können Sie Ihre Frage etwas genauer stellen?', noAnswer:'Dazu habe ich leider keine Antwort erhalten.',
       approx:'⚠ Näherung', approxTxt:'keine exakten Daten — beste verfügbare Näherung', groundedLive:'✓ geerdet · Live-Quelle', reused:' · wiederverwendet', liveRows:' Live-Zeile(n)',
       qYour:'Ihre Frage:', qFollow:'Weiter gefragt:', qQuestion:'Frage:', ffHeader:'💡 Wussten Sie schon?', wikiSource:'Quelle: Wikipedia', inviteFallback:'Möchten Sie noch etwas wissen?',
       sttFail:'Ich habe leider nichts verstanden — bitte erneut auf 🎙️ tippen und sprechen, oder tippen Sie Ihre Frage.', sttError:'Spracherkennung fehlgeschlagen — bitte tippen Sie Ihre Frage.',
@@ -188,7 +188,7 @@
       state_idle:'Ready', state_listen:'Listening', state_think:'Understanding', state_query:'Live query', state_speak:'Answering', state_done:'Done',
       status0:'I understood your question …', status1:'Finding the matching Deutschlandatlas table …', status2:'Querying the live data from the official source …', status3:'Checking the values and composing your answer …',
       understanding:'Understanding your question …', fetching:'Fetching the answer …', processingRec:'Processing your recording …', listening:'🎙️ Listening … (tap 🎙️ again to stop)',
-      connError:'Connection error: ', clarify:'Could you phrase your question a bit more precisely?', noAnswer:'Sorry, I did not get an answer for that.',
+      connError:'Connection error: ', busy:'It is quite busy right now — please ask your question again in a moment.', micUnclear:'Sorry, I did not catch that — please try again.', clarify:'Could you phrase your question a bit more precisely?', noAnswer:'Sorry, I did not get an answer for that.',
       approx:'⚠ Approximation', approxTxt:'no exact data — best available approximation', groundedLive:'✓ grounded · live source', reused:' · reused', liveRows:' live row(s)',
       qYour:'Your question:', qFollow:'Follow-up:', qQuestion:'Question:', ffHeader:'💡 Did you know?', wikiSource:'Source: Wikipedia', inviteFallback:'Would you like to know anything else?',
       sttFail:'Sorry, I did not catch that — tap 🎙️ again and speak, or type your question.', sttError:'Speech recognition failed — please type your question.',
@@ -469,8 +469,9 @@
     try{
       const d=await (await fetch('/answer',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({query})})).json();
       stopWait();
-      const ans=d.answer||d.error||tr('noAnswer');
-      const matched=d.meta?(d.meta.has_real_data!==false && !!d.meta.table):true;
+      const okA=d.ok!==false;   // false only when /answer itself failed (e.g. edge overload); a valid no-data answer is still ok:true
+      const ans=okA?(d.answer||tr('noAnswer')):tr('busy');
+      const matched=okA&&(d.meta?(d.meta.has_real_data!==false && !!d.meta.table):true);
       type(aEl,ans,()=>{
         if(d.meta){const m=d.meta;src.style.display='flex';
           if(!matched){src.classList.add('refuse');src.querySelector('.tick').textContent=tr('approx');srcTxt.textContent=tr('approxTxt');}
@@ -479,11 +480,12 @@
         }
       });
       awaitingAnswer=false;   // the answer slot is now in the queue -> normal ordered pump takes over
-      fill(sA, d.audioUrl);
+      fill(sA, okA?d.audioUrl:null);
+      go.disabled=false; q.disabled=false;
+      if(!okA){ followupActive=false; renderExamples(); setState('done'); return; }   // degrade cleanly on failure: no broken follow-up on a non-answer, offer examples instead of an empty state (finally still runs)
       lastQuery=query; lastAnswer=ans;
       history.push({q:query, place:(d.meta&&(d.meta.place_resolved||d.meta.place_name_requested))||null, answer:ans});
       if(history.length>6) history.shift();
-      go.disabled=false; q.disabled=false;
       const sI=slot(); sI.optional=true;   // follow-up invite is nice-to-have: never bridge it with endless fillers — it plays when ready
       doFollowup(query, ans).then(u=>fill(sI, u));
     }catch(e){awaitingAnswer=false;stopFillerLoop();stopWait();aEl.className='a';aEl.textContent=tr('connError')+e.message;setState('done');go.disabled=false;q.disabled=false;fill(sV,null);fill(sF,null);fill(sA,null);}
@@ -534,8 +536,9 @@
         try{
           const blob=new Blob(recChunks,{type:(mediaRec&&mediaRec.mimeType)||'audio/webm'});
           const d=await (await fetch('/stt',{method:'POST',headers:{'content-type':blob.type},body:blob})).json();
-          if(d.text && d.text.trim()){ q.value=d.text.trim(); ask(); }
-          else { aEl.className='a'; aEl.textContent=tr('sttFail'); setState('idle'); }
+          const stt=(d.text||'').replace(/[\[(][^\])]*[\])]/g,'').trim();   // strip Whisper non-speech placeholders ([Musik], (Applaus), …) that silence/noise produces
+          if(stt.length>=4 && /[a-zäöüß]/i.test(stt)){ q.value=stt; ask(); }   // real speech -> ask
+          else { aEl.className='a'; aEl.textContent=tr('micUnclear'); setState('idle'); }   // silence/noise/placeholder -> DON'T feed garbage into the state machine
         }catch(e){ aEl.className='a'; aEl.textContent=tr('sttError'); setState('idle'); }
       };
       mediaRec.start(); recording=true; mic.classList.add('on'); setState('listen');
