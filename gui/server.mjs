@@ -591,10 +591,16 @@ async function prewarmGreetings() {
 // F1 = generic bridging shown on the FIRST question and as a fallback: atlas/bunsenbrenner info, warmed
 // once at startup so /context can serve it INSTANTLY instead of the ~21s live verstehen+funfact synth.
 const BRIDGE_FACTS = [
-  'Der Deutschlandatlas bündelt über hundert Indikatoren zu Regionaldaten — von Beschäftigung über Wohnen bis Infrastruktur. Einen Moment, ich hole die passenden Zahlen für Sie.',
-  'Dieses Callcenter läuft über den bunsenbrenner.org-Tunnel: Ihre Frage und die Antwort sind Ende-zu-Ende-verschlüsselt, der Betreiber sieht die Inhalte nicht. Ich schaue die Daten gerade nach.',
-  'Die Zahlen hier kommen live aus dem echten Deutschlandatlas, nicht aus einem statischen Datensatz. Ich frage die aktuellen Werte für Sie ab.',
-  'bunsenbrenner.org zeigt, wie Agenten über einen Tunnel zusammenarbeiten, ohne dass eine Seite offene Ports öffnet. Einen Augenblick, ich sehe in den Regionaldaten nach.',
+  'Während ich für Sie nachsehe: der Deutschlandatlas bündelt über hundert Indikatoren zu ganz Deutschland, von Beschäftigung über Wohnen bis Infrastruktur — gleich habe ich Ihre Zahl.',
+  'Ich frage Ihre Werte gerade live aus dem echten Deutschlandatlas ab, nichts Vorgefertigtes, sondern der aktuelle Stand direkt aus der Quelle — einen kleinen Moment noch.',
+  'Einen Augenblick, ich hole die Regionaldaten für Sie — die laufen übrigens Ende-zu-Ende-verschlüsselt über den Tunnel, sodass niemand außer Ihnen die Frage mitliest.',
+  'Ich schaue gerade in den Zahlen nach; der Atlas deckt jeden Landkreis in Deutschland ab, deshalb kann ich Ihnen gleich einen ganz konkreten Wert für Ihren Ort nennen.',
+  'Gerade hole ich Ihre Daten heran — der Deutschlandatlas wird laufend aktualisiert, Sie bekommen also den aktuellen Stand und keine alte Momentaufnahme.',
+  'Ich sehe die passende Tabelle gerade durch — für die meisten Kennzahlen reichen die Werte bis auf die Kreisebene hinunter, gleich habe ich Ihre.',
+  'Während ich nachschaue: diese Zahlen kommen aus dem offiziellen Deutschlandatlas des Bundes, nicht aus einer Schätzung — einen kurzen Augenblick.',
+  'Ich hole Ihre Werte gerade heran; der Atlas vergleicht Regionen quer durch Deutschland — Beschäftigung, Bildung, Gesundheit, Umwelt und mehr — gleich sind Ihre Daten da.',
+  'Einen Moment noch, ich frage die aktuellen Regionaldaten ab — die ganze Abfrage läuft verschlüsselt über den Tunnel, ohne dass Ihre Frage irgendwo mitgelesen wird.',
+  'Lassen Sie mich kurz den passenden Datensatz heraussuchen — der Deutschlandatlas macht regionale Unterschiede in Deutschland sichtbar, und gleich sehen Sie Ihren Wert.',
 ];
 let bridgeRot = 0;
 async function prewarmBridge() {
@@ -630,7 +636,11 @@ const GAP_TEXTS = [
   'Einen Moment — ich schaue die aktuellen Zahlen im Deutschlandatlas für Sie nach.',
   'Ich frage die passenden Regionaldaten gerade live ab, einen kurzen Augenblick.',
   'Alles klar — ich hole die Werte aus dem Deutschlandatlas, gleich habe ich sie.',
-  'Ich sehe in der Datenbank nach — die aktuellen Daten kommen gleich.',
+  'Ich sehe in der Datenbank nach, die aktuellen Daten kommen gleich.',
+  'Lassen Sie mich das kurz für Sie nachschlagen, einen Augenblick.',
+  'Ich hole Ihre Zahl gerade aus dem Atlas — gleich bin ich da.',
+  'Gerne — ich suche die passenden Daten heraus, gleich habe ich Ihre Antwort.',
+  'Einen kleinen Moment, ich prüfe das eben im Deutschlandatlas für Sie.',
 ];
 let gapRot = 0;
 async function prewarmGap() {
