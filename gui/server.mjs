@@ -810,9 +810,10 @@ const server = createServer(async (req, res) => {
     const b = await readBody(req);
     const query = (b.query || '').toString().slice(0, 300);
     if (!query.trim()) return jsonRes(res, 400, { error: 'empty query' });
+    answerFor(query);                    // t=0: Atlas-DATA-Pipeline SOFORT auf der Rohfrage feuern, parallel zu understand()+verstehen/funfact/Bridge
     const u = await understand(query, b.context);
     trace('understand', { query, precise: u.precise, kind: u.kind, clarify: (u.clarify || '').slice(0, 70), best_guess: u.best_guess, slots: u.slots });
-    answerFor(u.best_guess);                       // fire speculation in the background
+    answerFor(u.best_guess);             // wärmt die aufgelöste Frage (Cache-Treffer wenn === Rohfrage)
     let clarifyAudioUrl = null;
     if (!u.precise && u.clarify) { try { clarifyAudioUrl = proxied(await ttsSpeak(u.clarify, 'primary')); } catch {} }
     return jsonRes(res, 200, { ...u, clarifyAudioUrl });
