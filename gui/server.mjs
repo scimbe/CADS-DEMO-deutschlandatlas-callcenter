@@ -128,9 +128,11 @@ function stripPronunciation(text) {
 // Writes a WAV under a capped temp dir and returns a same-origin /tts/<id>.wav path.
 const TTS_DIR = join(tmpdir(), 'cc-tts');
 let ttsSeq = 0;
+const greetingCache = new Map(); // raw greeting text -> /tts/<id>.wav
 function pruneTtsDir(keep = 100) {
   try {
-    const files = readdirSync(TTS_DIR).filter((f) => f.endsWith('.wav'))
+    const keepFiles = new Set([...greetingCache.values()].map((u) => u.replace('/tts/', '')));
+    const files = readdirSync(TTS_DIR).filter((f) => f.endsWith('.wav') && !keepFiles.has(f))
       .map((f) => ({ f, t: statSync(join(TTS_DIR, f)).mtimeMs })).sort((a, b) => b.t - a.t);
     for (const { f } of files.slice(keep)) { try { unlinkSync(join(TTS_DIR, f)); } catch {} }
   } catch {}
@@ -563,6 +565,11 @@ const GREETINGS = [
 ];
 let greetRot = 0;
 function greetingText() { return GREETINGS[(greetRot++) % GREETINGS.length]; }
+async function prewarmGreetings() {
+  for (const g of GREETINGS) {
+    try { const au = await ttsSpeak(stripPronunciation(g), 'primary', false); if (au && au.startsWith('/tts/')) greetingCache.set(g, au); } catch {}
+  }
+}
 let introRot = 0;
 async function introBridge(context) {
   // Invariant I3: the bridge identity is decided by turnCount (how many turns were already
@@ -851,8 +858,11 @@ const server = createServer(async (req, res) => {
   }
   if (req.method === 'POST' && req.url === '/greeting') {
     // #1: a short welcome, pre-synthesized so it plays instantly on the caller's first interaction.
-    const text = stripPronunciation(greetingText());
-    let au = null; try { au = await ttsSpeak(text, 'primary', false); } catch {}   // prefetch (next-turn bridge / topic-ack / greeting) -> low priority, must not slow the current answer's TTS
+    const g = greetingText();                 // raw greeting (rotates) = cache key
+    const text = stripPronunciation(g);
+    const cached = greetingCache.get(g);
+    if (cached) return jsonRes(res, 200, { text, audioUrl: proxied(cached) });
+    let au = null; try { au = await ttsSpeak(text, 'primary', false); } catch {}
     return jsonRes(res, 200, { text, audioUrl: proxied(au) });
   }
   if (req.method === 'POST' && (req.url === '/answer' || req.url === '/ask')) {
@@ -969,7 +979,7 @@ const server = createServer(async (req, res) => {
   res.writeHead(404); res.end('not found');
 });
 const HOST = process.env.CC_HOST || '127.0.0.1';   // default local-only; set CC_HOST=0.0.0.0 in a container fronted by a tunnel
-server.listen(PORT, HOST, () => console.log(`callcenter GUI on http://${HOST}:${PORT}`));
+server.listen(PORT, HOST, () => { console.log(`callcenter GUI on http://${HOST}:${PORT}`); prewarmGreetings(); });
 ensureFillers().catch(() => {});   // self-contained wait-clips (no-op if already present or no Piper)
 
 // A single bad request (e.g. a missing static asset hit by two writeHead calls, see the
