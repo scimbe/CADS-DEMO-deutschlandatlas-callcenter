@@ -26,7 +26,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # whisper.cpp (Linux build) + multilingual base model
 WORKDIR /build
-RUN git clone --branch b4938 --depth 1 https://github.com/ggml-org/whisper.cpp.git
+# Optional gh-token secret (--secret id=gh_token,src=<file>): GitHub's anonymous
+# git-clone rate limit for this host's IP was hit 2026-09-02 (anonymous curl/DNS
+# still worked, only the git smart-HTTP clone got an auth challenge) -- falls
+# back to a plain anonymous clone when no secret is passed, so this stays a
+# no-op for anyone building without a token.
+RUN --mount=type=secret,id=gh_token \
+    if [ -s /run/secrets/gh_token ]; then \
+      git -c http.https://github.com/.extraheader="AUTHORIZATION: basic $(printf 'x:%s' "$(cat /run/secrets/gh_token)" | base64 -w0)" clone --branch b4938 --depth 1 https://github.com/ggml-org/whisper.cpp.git; \
+    else \
+      git clone --branch b4938 --depth 1 https://github.com/ggml-org/whisper.cpp.git; \
+    fi
 WORKDIR /build/whisper.cpp
 RUN cmake -B build -S . -DCMAKE_BUILD_TYPE=Release \
  && cmake --build build -j "$(nproc)" --config Release --target whisper-cli \
