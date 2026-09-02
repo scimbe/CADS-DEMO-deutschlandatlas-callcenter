@@ -128,9 +128,24 @@ function stripPronunciation(text) {
 // Writes a WAV under a capped temp dir and returns a same-origin /tts/<id>.wav path.
 const TTS_DIR = join(tmpdir(), 'cc-tts');
 let ttsSeq = 0;
+// Greeting clips are prewarmed at startup (see prewarmGreetings) and cached here; protect them from
+// pruning so the "logo -> first ton" stays instant even after many answer clips fill TTS_DIR.
+const greetingCache = new Map(); // raw greeting text -> /tts/<id>.wav
+// Pre-produced bridging pools (operator spec B1/F1/K1/N1): a generic F1 pool (atlas/bunsenbrenner info,
+// first question + fallback) and a content-linked N1 queue (a "wussten Sie schon" produced in the
+// background right after each answer, for the NEXT round). Both hold /tts/<id>.wav clips protected below.
+const bridgeF1 = [];        // [{ text, audioUrl }]
+const bridgeN1Queue = [];   // [{ text, audioUrl, ... }] content-linked, FIFO
+const gapPool = [];         // [{ text, audioUrl }] pre-produced "looking it up" gap clips (verstehen slot)
 function pruneTtsDir(keep = 100) {
   try {
-    const files = readdirSync(TTS_DIR).filter((f) => f.endsWith('.wav'))
+    const keepFiles = new Set([
+      ...[...greetingCache.values()],
+      ...bridgeF1.map((c) => c.audioUrl),
+      ...bridgeN1Queue.map((c) => c.audioUrl),
+      ...gapPool.map((c) => c.audioUrl),
+    ].filter(Boolean).map((u) => u.replace('/tts/', '')));
+    const files = readdirSync(TTS_DIR).filter((f) => f.endsWith('.wav') && !keepFiles.has(f))
       .map((f) => ({ f, t: statSync(join(TTS_DIR, f)).mtimeMs })).sort((a, b) => b.t - a.t);
     for (const { f } of files.slice(keep)) { try { unlinkSync(join(TTS_DIR, f)); } catch {} }
   } catch {}
@@ -169,7 +184,7 @@ function ttsChannel(text, voice = 'primary') {
     const payload = JSON.stringify({ text, voice });
     const p = spawn('bash', ['-c',
       `set -a; source "$CT_RELAY_ENV"; set +a; printf '%s' '${payload.replace(/'/g, "'\\''")}' | ` +
-      `CT_CHANNEL_ROLE=initiate CT_CHANNEL_CALL_SERVICE=audio_generation CT_CHANNEL_CALL_PERSISTENT=0 CT_CHANNEL_RELAY_ONLY=1 ` +
+      `CT_CHANNEL_ROLE=initiate CT_CHANNEL_CALL_SERVICE=audio_generation CT_CHANNEL_CALL_PERSISTENT=${process.env.CC_CALL_PERSISTENT || '0'} CT_CHANNEL_RELAY_ONLY=1 ` +
       `CT_CHANNEL_ID="${process.env.CT_AUDIO_CHANNEL_ID}" CT_CHANNEL_GRANT="$CT_CHANNEL_GRANT_2E" CT_CHANNEL_HOLDER_KEY="$CT_CHANNEL_HOLDER_KEY" CT_CHANNEL_NOISE_KEY="$CT_CHANNEL_NOISE_KEY" ` +
       `CT_CHANNEL_FRONT_DOOR=bunsenbrenner.org:443 CT_CHANNEL_FRONT_DOOR_CERT="$CT_CHANNEL_FRONT_DOOR_CERT" CT_CHANNEL_FRONT_DOOR_ONLY=1 ` +
       `CT_CHANNEL_BROKER=bunsenbrenner.org:4435 CT_CHANNEL_RELAY=bunsenbrenner.org:4436 "$CT_AGENT_BIN" channel 2>/dev/null | tail -1`],
@@ -205,7 +220,23 @@ async function localizeChannelClip(url) {
   } catch { return url; }
 }
 
-function ttsSpeak(text, voice = 'primary', priority = true) {
+// STREAMING path (CC_TTS_STREAM=1): for the immediate, user-facing answer the real-time character
+// matters -- buffering the whole clip (localizeChannelClip) before playback kills it. Instead of
+// fetching+buffering here, register the channel clip URL and return a same-origin /tts-stream/<id>
+// path IMMEDIATELY; the browser's plain <audio> element then plays it progressively while the
+// /tts-stream route pipes llm2's chunked WAV through in real time (no MediaSource needed). Used only
+// for priority (answer) calls; prefetched/warmed clips keep localizeChannelClip's TTL-safe caching.
+const streamClips = new Map(); // id -> { url, ts }
+function streamChannelClip(url) {
+  const id = 'st-' + process.pid + '-' + (ttsSeq++);
+  streamClips.set(id, { url, ts: Date.now() });
+  const cutoff = Date.now() - 15 * 60 * 1000; // channel-URL TTL
+  for (const [k, v] of streamClips) { if (v.ts < cutoff) streamClips.delete(k); }
+  while (streamClips.size > 128) { const k = streamClips.keys().next().value; streamClips.delete(k); }
+  return '/tts-stream/' + id;
+}
+
+function ttsSpeak(text, voice = 'primary', priority = true, forceStream = false) {
   text = stripPronunciation(text);
   if (process.env.CC_TTS !== '1') return Promise.resolve(null);
   // Production voice = the llm2 agent `audio_generation` channel (operator directive), CHANNEL-FIRST.
@@ -219,7 +250,7 @@ function ttsSpeak(text, voice = 'primary', priority = true) {
   if (channelReady) {
     // serialise channel calls (chanLimit=1) so verstehen/funfact/answer don't thrash llm2's single-slot
     // serve; the user-facing answer (priority=true) still jumps ahead of any low-priority prefetch.
-    return chanLimit(() => ttsChannel(text, voice), priority).then((url) => (url ? localizeChannelClip(url) : (piperReady ? ttsLocalPiper(text, priority) : null)));
+    return chanLimit(() => ttsChannel(text, voice), priority).then((url) => (url ? ((process.env.CC_TTS_STREAM === '1' && (priority || forceStream)) ? streamChannelClip(url) : localizeChannelClip(url)) : (piperReady ? ttsLocalPiper(text, priority) : null)));
   }
   if (piperReady) return ttsLocalPiper(text, priority);
   return Promise.resolve(null);
@@ -340,7 +371,7 @@ function sttChannel(audioUrl, lang = 'de') {
     const payload = JSON.stringify({ audio_url: audioUrl, lang });
     const p = spawn('bash', ['-c',
       `set -a; source "$CT_RELAY_ENV"; set +a; printf '%s' '${payload.replace(/'/g, "'\\''")}' | ` +
-      `CT_CHANNEL_ROLE=initiate CT_CHANNEL_CALL_SERVICE=speech_to_text CT_CHANNEL_CALL_PERSISTENT=0 CT_CHANNEL_RELAY_ONLY=1 ` +
+      `CT_CHANNEL_ROLE=initiate CT_CHANNEL_CALL_SERVICE=speech_to_text CT_CHANNEL_CALL_PERSISTENT=${process.env.CC_CALL_PERSISTENT || '0'} CT_CHANNEL_RELAY_ONLY=1 ` +
       `CT_CHANNEL_ID="${process.env.CT_AUDIO_CHANNEL_ID}" CT_CHANNEL_GRANT="$CT_CHANNEL_GRANT_2E" CT_CHANNEL_HOLDER_KEY="$CT_CHANNEL_HOLDER_KEY" CT_CHANNEL_NOISE_KEY="$CT_CHANNEL_NOISE_KEY" ` +
       `CT_CHANNEL_FRONT_DOOR=bunsenbrenner.org:443 CT_CHANNEL_FRONT_DOOR_CERT="$CT_CHANNEL_FRONT_DOOR_CERT" CT_CHANNEL_FRONT_DOOR_ONLY=1 ` +
       `CT_CHANNEL_BROKER=bunsenbrenner.org:4435 CT_CHANNEL_RELAY=bunsenbrenner.org:4436 "$CT_AGENT_BIN" channel 2>/dev/null`],
@@ -548,6 +579,66 @@ const GREETINGS = [
 ];
 let greetRot = 0;
 function greetingText() { return GREETINGS[(greetRot++) % GREETINGS.length]; }
+// Warm all greeting variants once at startup so /greeting serves an instant cached clip instead of
+// paying the ~7s cold channel-setup on each caller's first interaction. chanLimit=1 serialises these,
+// so they never contend with a live answer; best-effort, cache-misses fall back to on-demand.
+async function prewarmGreetings() {
+  for (const g of GREETINGS) {
+    try { const au = await ttsSpeak(stripPronunciation(g), 'primary', false); if (au && au.startsWith('/tts/')) greetingCache.set(g, au); } catch {}
+  }
+}
+
+// F1 = generic bridging shown on the FIRST question and as a fallback: atlas/bunsenbrenner info, warmed
+// once at startup so /context can serve it INSTANTLY instead of the ~21s live verstehen+funfact synth.
+const BRIDGE_FACTS = [
+  'Der Deutschlandatlas bündelt über hundert Indikatoren zu Regionaldaten — von Beschäftigung über Wohnen bis Infrastruktur. Einen Moment, ich hole die passenden Zahlen für Sie.',
+  'Dieses Callcenter läuft über den bunsenbrenner.org-Tunnel: Ihre Frage und die Antwort sind Ende-zu-Ende-verschlüsselt, der Betreiber sieht die Inhalte nicht. Ich schaue die Daten gerade nach.',
+  'Die Zahlen hier kommen live aus dem echten Deutschlandatlas, nicht aus einem statischen Datensatz. Ich frage die aktuellen Werte für Sie ab.',
+  'bunsenbrenner.org zeigt, wie Agenten über einen Tunnel zusammenarbeiten, ohne dass eine Seite offene Ports öffnet. Einen Augenblick, ich sehe in den Regionaldaten nach.',
+];
+let bridgeRot = 0;
+async function prewarmBridge() {
+  for (const t of BRIDGE_FACTS) {
+    try { const au = await ttsSpeak(stripPronunciation(t), 'primary', false); if (au && au.startsWith('/tts/')) bridgeF1.push({ text: t, audioUrl: au }); } catch {}
+  }
+}
+// K1 -> N1: right after each answer, produce the NEXT round's "wussten Sie schon" in the BACKGROUND,
+// content-linked to the place just answered, so it is ready as instant N1 when the next question comes.
+async function produceNextN1(place) {
+  if (!place) return;
+  if (bridgeN1Queue.length >= 2) return;   // already stocked -> don't fire a contending wiki+narrate+TTS after EVERY answer (feeds the chanLimit=1 starvation)
+  try {
+    const ff = await wikiFunFact(place);
+    if (ff && ff.text) {
+      const ftext = stripPronunciation(await narrate(ff.text, 'funfact'));
+      const au = await ttsSpeak(ftext, 'primary', false);
+      if (au && au.startsWith('/tts/')) { bridgeN1Queue.push({ ...ff, text: ftext, audioUrl: au }); while (bridgeN1Queue.length > 4) bridgeN1Queue.shift(); }
+    }
+  } catch {}
+}
+// Pick the pre-produced bridge to speak while the answer computes: prefer the content-linked N1 from a
+// prior round, else a generic F1 clip; null means the pool is not warm yet -> caller synthesizes live.
+function pickBridge() {
+  if (bridgeN1Queue.length) return bridgeN1Queue.shift();
+  if (bridgeF1.length) return bridgeF1[bridgeRot++ % bridgeF1.length];
+  return null;
+}
+// GAP = the operator-spec "Ich schaue in der Datenbank nach…" slot (replaces the live verstehen TTS).
+// Pre-produced at startup so /context carries NO live channel TTS at all -> it returns instantly and
+// stays out of the chanLimit=1 contention that otherwise queued it behind the answer + speculation.
+const GAP_TEXTS = [
+  'Einen Moment — ich schaue die aktuellen Zahlen im Deutschlandatlas für Sie nach.',
+  'Ich frage die passenden Regionaldaten gerade live ab, einen kurzen Augenblick.',
+  'Alles klar — ich hole die Werte aus dem Deutschlandatlas, gleich habe ich sie.',
+  'Ich sehe in der Datenbank nach — die aktuellen Daten kommen gleich.',
+];
+let gapRot = 0;
+async function prewarmGap() {
+  for (const t of GAP_TEXTS) {
+    try { const au = await ttsSpeak(stripPronunciation(t), 'primary', false); if (au && au.startsWith('/tts/')) gapPool.push({ text: t, audioUrl: au }); } catch {}
+  }
+}
+function pickGap() { return gapPool.length ? gapPool[gapRot++ % gapPool.length] : null; }
 let introRot = 0;
 async function introBridge(context) {
   // Invariant I3: the bridge identity is decided by turnCount (how many turns were already
@@ -788,9 +879,14 @@ const server = createServer(async (req, res) => {
     const b = await readBody(req);
     const query = (b.query || '').toString().slice(0, 300);
     if (!query.trim()) return jsonRes(res, 400, { error: 'empty query' });
+    // Fire the Atlas DATA pipeline IMMEDIATELY on the raw query (t=0, in parallel with understand() +
+    // the spoken verstehen/funfact/bridge) so its ~10s catalog-match+phrasing-LLM latency runs UNDER the
+    // preamble instead of after it. answerFor dedupes by key, so the best_guess warm below is a cache hit
+    // whenever understand didn't rewrite the query (the common case); a rewrite just warms both.
+    answerFor(query);                              // t=0 speculation: max lead time for the Atlas query (operator: "sofort parallel absenden")
     const u = await understand(query, b.context);
     trace('understand', { query, precise: u.precise, kind: u.kind, clarify: (u.clarify || '').slice(0, 70), best_guess: u.best_guess, slots: u.slots });
-    answerFor(u.best_guess);                       // fire speculation in the background
+    answerFor(u.best_guess);                       // also warm the resolved query (cache hit when === raw)
     let clarifyAudioUrl = null;
     if (!u.precise && u.clarify) { try { clarifyAudioUrl = proxied(await ttsSpeak(u.clarify, 'primary')); } catch {} }
     return jsonRes(res, 200, { ...u, clarifyAudioUrl });
@@ -808,16 +904,24 @@ const server = createServer(async (req, res) => {
     const b = await readBody(req);
     const q = (b.query || '').toString().slice(0, 300);
     const place = placeFromQuery(q) || q;
-    const vtext = stripPronunciation(verstehenText(q));
-    let vau = null, funfact = null;
-    const ff = await wikiFunFact(place);
-    let ftext = null, fau = null;
-    if (ff && ff.text) ftext = stripPronunciation(await narrate(ff.text, 'funfact'));
-    await Promise.all([
-      ttsSpeak(vtext, 'primary').then((u) => { vau = u; }, () => {}),
-      ftext ? ttsSpeak(ftext, 'primary').then((u) => { fau = u; }, () => {}) : Promise.resolve(),
-    ]);
-    if (ff && ftext) funfact = { ...ff, text: ftext, audioUrl: proxied(fau) };
+    let vtext, vau = null, funfact = null;
+    // Both preamble slots are now PRE-PRODUCED so /context carries NO live channel TTS (operator spec):
+    // verstehen -> a "looking it up" GAP clip; funfact -> the F1/N1 bridge. This takes /context out of the
+    // chanLimit=1 contention entirely. Live synthesis only if a pool isn't warm yet (startup window).
+    const gap = pickGap();
+    const pre = pickBridge();
+    if (gap) { vtext = gap.text; vau = gap.audioUrl; }
+    else { vtext = stripPronunciation(verstehenText(q)); await ttsSpeak(vtext, 'primary').then((u) => { vau = u; }, () => {}); }
+    if (pre) {
+      funfact = { ...pre, audioUrl: proxied(pre.audioUrl) };
+    } else {
+      const ff = await wikiFunFact(place);
+      if (ff && ff.text) {
+        const ftext = stripPronunciation(await narrate(ff.text, 'funfact'));
+        let fau = null; await ttsSpeak(ftext, 'primary').then((u) => { fau = u; }, () => {});
+        funfact = { ...ff, text: ftext, audioUrl: proxied(fau) };
+      }
+    }
     return jsonRes(res, 200, { verstehen: { text: vtext, audioUrl: proxied(vau) }, funfact });
   }
   if (req.method === 'POST' && req.url === '/intro') {
@@ -835,9 +939,14 @@ const server = createServer(async (req, res) => {
     return jsonRes(res, 200, { text, audioUrl: proxied(au) });
   }
   if (req.method === 'POST' && req.url === '/greeting') {
-    // #1: a short welcome, pre-synthesized so it plays instantly on the caller's first interaction.
-    const text = stripPronunciation(greetingText());
-    let au = null; try { au = await ttsSpeak(text, 'primary', false); } catch {}   // prefetch (next-turn bridge / topic-ack / greeting) -> low priority, must not slow the current answer's TTS
+    // #1: a short welcome, played on the caller's first interaction. Served from the startup prewarm
+    // cache (instant) so the "logo -> first ton" doesn't pay the ~7s cold channel-setup per caller;
+    // falls back to on-demand synthesis only while the boot warm hasn't finished yet.
+    const g = greetingText();                 // raw greeting (rotates) = cache key
+    const text = stripPronunciation(g);
+    const cached = greetingCache.get(g);
+    if (cached) return jsonRes(res, 200, { text, audioUrl: proxied(cached) });
+    let au = null; try { au = await ttsSpeak(text, 'primary', false); } catch {}
     return jsonRes(res, 200, { text, audioUrl: proxied(au) });
   }
   if (req.method === 'POST' && (req.url === '/answer' || req.url === '/ask')) {
@@ -850,6 +959,7 @@ const server = createServer(async (req, res) => {
     let audioUrl = null;
     if (r.ok && r.answer) { try { audioUrl = proxied(await ttsSpeak(r.answer, 'primary', true)); } catch {} }
     trace('answer', { query, ok: r.ok, table: r.meta && r.meta.table, has_real_data: r.meta && r.meta.has_real_data, rows: r.meta && r.meta.live_rows_used, reused: r.reused, err: r.err });
+    produceNextN1(r.meta && (r.meta.place_resolved || r.meta.place_name_requested));   // K1: content-linked "wussten Sie schon" for the NEXT round's instant N1 bridge (background)
     // warm follow-up candidates in the background so /followup can validate them from cache (some cities have no data)
     if (r.ok && r.meta && r.meta.table && r.meta.has_real_data !== false) {
       const place = placeFromQuery(query) || r.meta.place_name_requested || r.meta.place_resolved || '';
@@ -867,11 +977,12 @@ const server = createServer(async (req, res) => {
     const place = placeFromQuery(query) || (cur && cur.meta && (cur.meta.place_name_requested || cur.meta.place_resolved)) || '';
     // Candidates: same-question place swaps (warmed during /answer) + LLM variety. NONE is trusted blindly --
     // the pipeline genuinely has no data for some cities, so every candidate is validated against a live run.
-    const swaps = curHasData ? swapCityFollowups(query, place, 6) : [];
+    const swaps = curHasData ? swapCityFollowups(query, place, 3) : [];
     const seen = new Set([query]); const candidates = [];
     for (const s of [...swaps, ...f.suggestions]) { if (s && !seen.has(s)) { seen.add(s); candidates.push(s); } }
+    candidates.splice(4);   // cap the background burst: warming 9+ live city-pipelines starved the real answer (chanLimit=1 TTS + litellm-over-tunnel contention). 4 is plenty to yield 3 validated.
     candidates.forEach((s) => answerFor(s));   // warm (swaps are mostly cache hits from /answer already)
-    const validated = await validateSuggestions(candidates, 3, 35000);   // ONLY answerable ones survive
+    const validated = await validateSuggestions(candidates, 3, 8000);   // ONLY answerable ones survive; short deadline so /followup doesn't hog LLM+TTS from the next real answer
     // spoken invite must also be answerable -> derive it from a validated suggestion (fall back to a safe generic)
     const inviteText = validated.length ? deriveInvite(validated[0])
       : 'Möchten Sie noch etwas aus dem Deutschlandatlas wissen?';
@@ -887,6 +998,22 @@ const server = createServer(async (req, res) => {
   if (req.method === 'GET' && /^\/tts\/[\w.-]+\.wav$/.test(req.url)) {
     try { const buf = await readFile(join(TTS_DIR, req.url.replace('/tts/', ''))); res.writeHead(200, { 'content-type': 'audio/wav', 'cache-control': 'no-store' }); res.end(buf); }
     catch { res.writeHead(404); res.end('no tts'); }
+    return;
+  }
+  // STREAMING proxy (CC_TTS_STREAM): pipe llm2's chunked WAV straight through so the plain <audio>
+  // element plays it progressively (real-time), instead of a fully-buffered file. Re-fetches the
+  // channel clip URL on request (fresh for the immediate answer; still within the ~15-min TTL for a
+  // prompt replay). On any upstream failure the stream just ends -- the answer text is already shown.
+  if (req.method === 'GET' && /^\/tts-stream\/[\w.-]+$/.test(req.url)) {
+    const entry = streamClips.get(req.url.replace('/tts-stream/', ''));
+    if (!entry) { res.writeHead(404); res.end('no stream'); return; }
+    try {
+      const up = await fetch(entry.url);
+      if (!up || !up.ok || !up.body) { res.writeHead(502); res.end('upstream'); return; }
+      res.writeHead(200, { 'content-type': up.headers.get('content-type') || 'audio/wav', 'cache-control': 'no-store' });
+      for await (const chunk of up.body) { if (!res.write(chunk)) await new Promise((r) => res.once('drain', r)); }
+      res.end();
+    } catch { try { if (!res.headersSent) res.writeHead(502); res.end(); } catch {} }
     return;
   }
   // Short-lived mic-audio blob for the speech_to_text channel (llm2 downloads it by this URL). Only
@@ -939,7 +1066,7 @@ const server = createServer(async (req, res) => {
   res.writeHead(404); res.end('not found');
 });
 const HOST = process.env.CC_HOST || '127.0.0.1';   // default local-only; set CC_HOST=0.0.0.0 in a container fronted by a tunnel
-server.listen(PORT, HOST, () => console.log(`callcenter GUI on http://${HOST}:${PORT}`));
+server.listen(PORT, HOST, () => { console.log(`callcenter GUI on http://${HOST}:${PORT}`); prewarmGreetings(); prewarmBridge(); prewarmGap(); });
 ensureFillers().catch(() => {});   // self-contained wait-clips (no-op if already present or no Piper)
 
 // A single bad request (e.g. a missing static asset hit by two writeHead calls, see the

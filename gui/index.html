@@ -308,7 +308,8 @@
     const it=seq.find(s=>!s.played);
     if(!it){ if(awaitingAnswer){ startFillerLoop(); return; }   // queue momentarily empty but a request is still computing -> keep bridging, more slots are coming
       setState('done'); speaking=false; stopFillerLoop(); return; }
-    if(!it.ready){ startFillerLoop(); return; }             // preserve order: never skip ahead of an unfilled slot — but bridge the wait with spoken fillers
+    if(!it.ready){ if(it.optional){ setState('done'); speaking=false; stopFillerLoop(); return; }   // optional tail slot (follow-up invite): don't filler-bridge it — go quiet, it plays when ready
+      startFillerLoop(); return; }             // preserve order: never skip ahead of an unfilled slot — but bridge the wait with spoken fillers
     if(!it.url){ it.played=true; pump(); return; }          // filled but silent -> skip to next
     stopFillerLoop();                                       // a real ordered clip is about to play -> silence the filler
     seqBusy=true; it.played=true; speaking=true; try{player.muted=false;}catch(e){} showCtl(); setState('speak'); replay.style.display='none';
@@ -483,7 +484,7 @@
       history.push({q:query, place:(d.meta&&(d.meta.place_resolved||d.meta.place_name_requested))||null, answer:ans});
       if(history.length>6) history.shift();
       go.disabled=false; q.disabled=false;
-      const sI=slot();
+      const sI=slot(); sI.optional=true;   // follow-up invite is nice-to-have: never bridge it with endless fillers — it plays when ready
       doFollowup(query, ans).then(u=>fill(sI, u));
     }catch(e){awaitingAnswer=false;stopFillerLoop();stopWait();aEl.className='a';aEl.textContent=tr('connError')+e.message;setState('done');go.disabled=false;q.disabled=false;fill(sV,null);fill(sF,null);fill(sA,null);}
     finally{ prepareNextIntro(); prepareTopicAck(); }   // I5: refresh next bridge + new-topic ack on EVERY path
