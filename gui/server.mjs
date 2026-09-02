@@ -169,7 +169,7 @@ function ttsChannel(text, voice = 'primary') {
     const payload = JSON.stringify({ text, voice });
     const p = spawn('bash', ['-c',
       `set -a; source "$CT_RELAY_ENV"; set +a; printf '%s' '${payload.replace(/'/g, "'\\''")}' | ` +
-      `CT_CHANNEL_ROLE=initiate CT_CHANNEL_CALL_SERVICE=audio_generation CT_CHANNEL_CALL_PERSISTENT=0 CT_CHANNEL_RELAY_ONLY=1 ` +
+      `CT_CHANNEL_ROLE=initiate CT_CHANNEL_CALL_SERVICE=audio_generation CT_CHANNEL_CALL_PERSISTENT=${process.env.CC_CALL_PERSISTENT || '0'} CT_CHANNEL_RELAY_ONLY=1 ` +
       `CT_CHANNEL_ID="${process.env.CT_AUDIO_CHANNEL_ID}" CT_CHANNEL_GRANT="$CT_CHANNEL_GRANT_2E" CT_CHANNEL_HOLDER_KEY="$CT_CHANNEL_HOLDER_KEY" CT_CHANNEL_NOISE_KEY="$CT_CHANNEL_NOISE_KEY" ` +
       `CT_CHANNEL_FRONT_DOOR=bunsenbrenner.org:443 CT_CHANNEL_FRONT_DOOR_CERT="$CT_CHANNEL_FRONT_DOOR_CERT" CT_CHANNEL_FRONT_DOOR_ONLY=1 ` +
       `CT_CHANNEL_BROKER=bunsenbrenner.org:4435 CT_CHANNEL_RELAY=bunsenbrenner.org:4436 "$CT_AGENT_BIN" channel 2>/dev/null | tail -1`],
@@ -205,6 +205,21 @@ async function localizeChannelClip(url) {
   } catch { return url; }
 }
 
+// CC_TTS_STREAM=1: skip the buffer-then-serve round trip for priority (real-answer) calls -- register
+// the channel clip URL in-memory and hand back a same-origin /tts-stream/<id> immediately; the actual
+// fetch happens lazily when the browser hits the route, streamed straight through (see the route
+// handler below), so <audio> can start playing before the clip is fully downloaded. TTL+size bounded
+// like TTS_DIR's own pruning; prefetch (priority=false) keeps localizeChannelClip (TTL-safe replay).
+const streamClips = new Map(); // id -> { url, ts }
+function streamChannelClip(url) {
+  const id = 'st-' + process.pid + '-' + (ttsSeq++);
+  streamClips.set(id, { url, ts: Date.now() });
+  const cutoff = Date.now() - 15 * 60 * 1000; // channel-URL TTL
+  for (const [k, v] of streamClips) if (v.ts < cutoff) streamClips.delete(k);
+  while (streamClips.size > 128) streamClips.delete(streamClips.keys().next().value);
+  return '/tts-stream/' + id;
+}
+
 function ttsSpeak(text, voice = 'primary', priority = true) {
   text = stripPronunciation(text);
   if (process.env.CC_TTS !== '1') return Promise.resolve(null);
@@ -219,7 +234,7 @@ function ttsSpeak(text, voice = 'primary', priority = true) {
   if (channelReady) {
     // serialise channel calls (chanLimit=1) so verstehen/funfact/answer don't thrash llm2's single-slot
     // serve; the user-facing answer (priority=true) still jumps ahead of any low-priority prefetch.
-    return chanLimit(() => ttsChannel(text, voice), priority).then((url) => (url ? localizeChannelClip(url) : (piperReady ? ttsLocalPiper(text, priority) : null)));
+    return chanLimit(() => ttsChannel(text, voice), priority).then((url) => (url ? ((process.env.CC_TTS_STREAM === '1' && priority) ? streamChannelClip(url) : localizeChannelClip(url)) : (piperReady ? ttsLocalPiper(text, priority) : null)));
   }
   if (piperReady) return ttsLocalPiper(text, priority);
   return Promise.resolve(null);
@@ -340,7 +355,7 @@ function sttChannel(audioUrl, lang = 'de') {
     const payload = JSON.stringify({ audio_url: audioUrl, lang });
     const p = spawn('bash', ['-c',
       `set -a; source "$CT_RELAY_ENV"; set +a; printf '%s' '${payload.replace(/'/g, "'\\''")}' | ` +
-      `CT_CHANNEL_ROLE=initiate CT_CHANNEL_CALL_SERVICE=speech_to_text CT_CHANNEL_CALL_PERSISTENT=0 CT_CHANNEL_RELAY_ONLY=1 ` +
+      `CT_CHANNEL_ROLE=initiate CT_CHANNEL_CALL_SERVICE=speech_to_text CT_CHANNEL_CALL_PERSISTENT=${process.env.CC_CALL_PERSISTENT || '0'} CT_CHANNEL_RELAY_ONLY=1 ` +
       `CT_CHANNEL_ID="${process.env.CT_AUDIO_CHANNEL_ID}" CT_CHANNEL_GRANT="$CT_CHANNEL_GRANT_2E" CT_CHANNEL_HOLDER_KEY="$CT_CHANNEL_HOLDER_KEY" CT_CHANNEL_NOISE_KEY="$CT_CHANNEL_NOISE_KEY" ` +
       `CT_CHANNEL_FRONT_DOOR=bunsenbrenner.org:443 CT_CHANNEL_FRONT_DOOR_CERT="$CT_CHANNEL_FRONT_DOOR_CERT" CT_CHANNEL_FRONT_DOOR_ONLY=1 ` +
       `CT_CHANNEL_BROKER=bunsenbrenner.org:4435 CT_CHANNEL_RELAY=bunsenbrenner.org:4436 "$CT_AGENT_BIN" channel 2>/dev/null`],
@@ -887,6 +902,21 @@ const server = createServer(async (req, res) => {
   if (req.method === 'GET' && /^\/tts\/[\w.-]+\.wav$/.test(req.url)) {
     try { const buf = await readFile(join(TTS_DIR, req.url.replace('/tts/', ''))); res.writeHead(200, { 'content-type': 'audio/wav', 'cache-control': 'no-store' }); res.end(buf); }
     catch { res.writeHead(404); res.end('no tts'); }
+    return;
+  }
+  // CC_TTS_STREAM=1 path: relay llm2's chunked clip response straight through, no buffering -- see
+  // streamChannelClip() above. Regex excludes '/' so no path traversal; streamClips only ever holds
+  // URLs we registered ourselves from llm2's own validated channel response, so no SSRF surface.
+  if (req.method === 'GET' && /^\/tts-stream\/[\w.-]+$/.test(req.url)) {
+    const entry = streamClips.get(req.url.replace('/tts-stream/', ''));
+    if (!entry) { res.writeHead(404); res.end('no stream'); return; }
+    try {
+      const up = await fetch(entry.url);
+      if (!up || !up.ok || !up.body) { res.writeHead(502); res.end('upstream'); return; }
+      res.writeHead(200, { 'content-type': up.headers.get('content-type') || 'audio/wav', 'cache-control': 'no-store' });
+      for await (const chunk of up.body) { if (!res.write(chunk)) await new Promise((r) => res.once('drain', r)); }
+      res.end();
+    } catch { try { if (!res.headersSent) res.writeHead(502); res.end(); } catch {} }
     return;
   }
   // Short-lived mic-audio blob for the speech_to_text channel (llm2 downloads it by this URL). Only
