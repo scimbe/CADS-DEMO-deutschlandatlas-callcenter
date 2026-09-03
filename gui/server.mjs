@@ -881,7 +881,7 @@ const jsonRes = (res, code, obj) => { res.writeHead(code, { 'content-type': 'app
 
 const server = createServer(async (req, res) => {
   if (req.method === 'GET' && (req.url === '/' || req.url === '/index.html')) {
-    try { const buf = await readFile(join(__dir, 'index.html')); res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store, must-revalidate' }); res.end(buf); }
+    try { const html = (await readFile(join(__dir, 'index.html'), 'utf8')).replace('</head>', `<script>window.CC_STT_LIVE=${process.env.CC_STT_LIVE === '1'};</script></head>`); res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store, must-revalidate' }); res.end(html); }
     catch { res.writeHead(500); res.end('index.html missing'); }
     return;
   }
