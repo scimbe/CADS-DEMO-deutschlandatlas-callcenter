@@ -583,9 +583,12 @@ function greetingText() { return GREETINGS[(greetRot++) % GREETINGS.length]; }
 // paying the ~7s cold channel-setup on each caller's first interaction. chanLimit=1 serialises these,
 // so they never contend with a live answer; best-effort, cache-misses fall back to on-demand.
 async function prewarmGreetings() {
+  let fail = 0;
   for (const g of GREETINGS) {
-    try { const au = await ttsSpeak(stripPronunciation(g), 'primary', false); if (au && au.startsWith('/tts/')) greetingCache.set(g, au); } catch {}
+    if (greetingCache.has(g)) continue;   // idempotent: don't re-warm what's already cached (retry-safe)
+    try { const au = await ttsSpeak(stripPronunciation(g), 'primary', false); if (au && au.startsWith('/tts/')) greetingCache.set(g, au); else fail++; } catch { fail++; }
   }
+  return fail;
 }
 
 // F1 = generic bridging shown on the FIRST question and as a fallback: atlas/bunsenbrenner info, warmed
@@ -604,9 +607,12 @@ const BRIDGE_FACTS = [
 ];
 let bridgeRot = 0;
 async function prewarmBridge() {
+  let fail = 0;
   for (const t of BRIDGE_FACTS) {
-    try { const au = await ttsSpeak(stripPronunciation(t), 'primary', false); if (au && au.startsWith('/tts/')) bridgeF1.push({ text: t, audioUrl: au }); } catch {}
+    if (bridgeF1.some((c) => c.text === t)) continue;   // idempotent: don't duplicate an already-warmed clip (retry-safe)
+    try { const au = await ttsSpeak(stripPronunciation(t), 'primary', false); if (au && au.startsWith('/tts/')) bridgeF1.push({ text: t, audioUrl: au }); else fail++; } catch { fail++; }
   }
+  return fail;
 }
 // K1 -> N1: right after each answer, produce the NEXT round's "wussten Sie schon" in the BACKGROUND,
 // content-linked to the place just answered, so it is ready as instant N1 when the next question comes.
@@ -644,8 +650,29 @@ const GAP_TEXTS = [
 ];
 let gapRot = 0;
 async function prewarmGap() {
+  let fail = 0;
   for (const t of GAP_TEXTS) {
-    try { const au = await ttsSpeak(stripPronunciation(t), 'primary', false); if (au && au.startsWith('/tts/')) gapPool.push({ text: t, audioUrl: au }); } catch {}
+    if (gapPool.some((c) => c.text === t)) continue;   // idempotent: don't duplicate an already-warmed clip (retry-safe)
+    try { const au = await ttsSpeak(stripPronunciation(t), 'primary', false); if (au && au.startsWith('/tts/')) gapPool.push({ text: t, audioUrl: au }); else fail++; } catch { fail++; }
+  }
+  return fail;
+}
+// Self-healing prewarm: run all three pools once, and if any stayed incomplete (e.g. llm2's TTS channel
+// was slow/failing at boot -- the silent-empty-pool blind spot services hit), LOG LOUDLY and retry every
+// 120s until full. chanLimit=1 keeps this gentle; idempotent warmers only fill the gaps. Once llm2
+// recovers the pools populate on their own, no container restart needed.
+let prewarming = false;
+async function prewarmLoop() {
+  if (prewarming) return; prewarming = true;
+  try { await prewarmGreetings(); await prewarmBridge(); await prewarmGap(); }
+  catch (e) { console.error('[prewarm] cycle error:', e && e.message); }
+  finally { prewarming = false; }
+  const g = greetingCache.size, f = bridgeF1.length, p = gapPool.length;
+  if (g >= GREETINGS.length && f >= BRIDGE_FACTS.length && p >= GAP_TEXTS.length) {
+    console.log(`[prewarm] all pools warm (greetings=${g}, bridge=${f}, gap=${p})`);
+  } else {
+    console.error(`[prewarm] INCOMPLETE greetings=${g}/${GREETINGS.length} bridge=${f}/${BRIDGE_FACTS.length} gap=${p}/${GAP_TEXTS.length} — llm2 TTS channel likely slow/failing; /greeting+/context fall back to LIVE synth until this fills. Retrying in 120s.`);
+    setTimeout(prewarmLoop, 120000);
   }
 }
 function pickGap() { return gapPool.length ? gapPool[gapRot++ % gapPool.length] : null; }
@@ -1076,7 +1103,7 @@ const server = createServer(async (req, res) => {
   res.writeHead(404); res.end('not found');
 });
 const HOST = process.env.CC_HOST || '127.0.0.1';   // default local-only; set CC_HOST=0.0.0.0 in a container fronted by a tunnel
-server.listen(PORT, HOST, () => { console.log(`callcenter GUI on http://${HOST}:${PORT}`); prewarmGreetings(); prewarmBridge(); prewarmGap(); });
+server.listen(PORT, HOST, () => { console.log(`callcenter GUI on http://${HOST}:${PORT}`); prewarmLoop(); });
 ensureFillers().catch(() => {});   // self-contained wait-clips (no-op if already present or no Piper)
 
 // A single bad request (e.g. a missing static asset hit by two writeHead calls, see the
