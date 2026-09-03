@@ -524,7 +524,23 @@
 
   // Microphone -> record -> OUR OWN server-side Whisper STT (no browser cloud dependency, works
   // in any modern browser). Click to start, click again to stop and transcribe.
-  let mediaRec=null,recording=false,recStream=null,recChunks=[],vadTimer=null,vadCtx=null,vadSpoke=false;
+  let mediaRec=null,recording=false,recStream=null,recChunks=[],vadTimer=null,vadCtx=null,vadSpoke=false,sttInFlight=false,lastInterim=0,interimSeq=0;
+  // Live partial transcript (operator #1/#3): while recording, re-transcribe the GROWING audio so the
+  // caller sees text appear as they speak. SINGLE-FLIGHT (one /stt at a time) + a ~1.8s floor, so it
+  // self-throttles to whisper's speed and never floods llm2's GPU (design agreed with llm2: 2 concurrent
+  // recordings are free, a floor stops short clips firing every ~0.3s). Best-effort — the authoritative
+  // transcription is still the final full call in onstop. Enable per deploy via CC_STT_LIVE.
+  async function interimStt(){
+    if(!window.CC_STT_LIVE || !recording || sttInFlight || !recChunks.length) return;
+    if(Date.now()-lastInterim < 1800) return;
+    sttInFlight=true; lastInterim=Date.now(); const myseq=++interimSeq;
+    try{
+      const blob=new Blob(recChunks,{type:(mediaRec&&mediaRec.mimeType)||'audio/webm'});
+      const d=await (await fetch('/stt',{method:'POST',headers:{'content-type':blob.type},body:blob})).json();
+      if(myseq===interimSeq && recording){ const t=(d.text||'').replace(/[\[(][^\])]*[\])]/g,'').trim(); if(t) q.value=t; }  // latest-wins live text
+    }catch(e){}
+    finally{ sttInFlight=false; }
+  }
   async function startRec(){
     try{
       recStream=await navigator.mediaDevices.getUserMedia({audio:true});
@@ -543,7 +559,7 @@
           else { aEl.className='a'; aEl.textContent=tr('micUnclear'); setState('idle'); }   // silence/noise/placeholder -> DON'T feed garbage into the state machine
         }catch(e){ aEl.className='a'; aEl.textContent=tr('sttError'); setState('idle'); }
       };
-      mediaRec.start(); recording=true; mic.classList.add('on'); setState('listen');
+      mediaRec.start(1000); recording=true; mic.classList.add('on'); setState('listen');   // 1s timeslice: recChunks grows so interimStt can re-transcribe the audio-so-far (harmless when live is off)
       aEl.className='a working'; aEl.textContent=tr('listening');
       // VAD auto-stop: watch the mic level and stop the recording ~1.4s after the caller stops speaking
       // (client-side RMS heuristic via Web Audio — no backend change). Manual mic click still stops too.
@@ -558,6 +574,7 @@
           if(rms>0.045){ vadSpoke=true; silentSince=0; }                                                              // speaking
           else if(vadSpoke){ if(!silentSince) silentSince=now; else if(now-silentSince>1400){ try{mediaRec&&mediaRec.stop();}catch(e){} } }  // 1.4s pause after speech -> auto-stop
           if(now-t0>20000){ try{mediaRec&&mediaRec.stop();}catch(e){} }                                               // 20s hard cap
+          interimStt();   // live partial transcript (self-gated: CC_STT_LIVE flag + single-flight + 1.8s floor)
         },120);
       }catch(e){}   // VAD is best-effort; without it the manual click still works
     }catch(err){
