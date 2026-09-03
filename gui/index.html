@@ -524,14 +524,16 @@
 
   // Microphone -> record -> OUR OWN server-side Whisper STT (no browser cloud dependency, works
   // in any modern browser). Click to start, click again to stop and transcribe.
-  let mediaRec=null,recording=false,recStream=null,recChunks=[];
+  let mediaRec=null,recording=false,recStream=null,recChunks=[],vadTimer=null,vadCtx=null,vadSpoke=false;
   async function startRec(){
     try{
       recStream=await navigator.mediaDevices.getUserMedia({audio:true});
       recChunks=[]; mediaRec=new MediaRecorder(recStream);
       mediaRec.ondataavailable=e=>{if(e.data&&e.data.size)recChunks.push(e.data);};
       mediaRec.onstop=async ()=>{
-        recording=false; mic.classList.remove('on'); try{recStream.getTracks().forEach(t=>t.stop());}catch(e){}
+        recording=false; mic.classList.remove('on');
+        try{ if(vadTimer){clearInterval(vadTimer);vadTimer=null;} if(vadCtx){vadCtx.close();vadCtx=null;} }catch(e){}   // tear down the VAD auto-stop watcher
+        try{recStream.getTracks().forEach(t=>t.stop());}catch(e){}
         setState('think'); aEl.className='a working'; aEl.textContent=tr('processingRec');
         try{
           const blob=new Blob(recChunks,{type:(mediaRec&&mediaRec.mimeType)||'audio/webm'});
@@ -543,6 +545,21 @@
       };
       mediaRec.start(); recording=true; mic.classList.add('on'); setState('listen');
       aEl.className='a working'; aEl.textContent=tr('listening');
+      // VAD auto-stop: watch the mic level and stop the recording ~1.4s after the caller stops speaking
+      // (client-side RMS heuristic via Web Audio — no backend change). Manual mic click still stops too.
+      try{
+        vadCtx=new (window.AudioContext||window.webkitAudioContext)();
+        const src=vadCtx.createMediaStreamSource(recStream), an=vadCtx.createAnalyser(); an.fftSize=512; src.connect(an);
+        const buf=new Uint8Array(an.fftSize); const t0=Date.now(); let silentSince=0; vadSpoke=false;
+        vadTimer=setInterval(()=>{
+          if(!recording) return;
+          an.getByteTimeDomainData(buf); let s=0; for(let i=0;i<buf.length;i++){const d=(buf[i]-128)/128; s+=d*d;}
+          const rms=Math.sqrt(s/buf.length), now=Date.now();
+          if(rms>0.045){ vadSpoke=true; silentSince=0; }                                                              // speaking
+          else if(vadSpoke){ if(!silentSince) silentSince=now; else if(now-silentSince>1400){ try{mediaRec&&mediaRec.stop();}catch(e){} } }  // 1.4s pause after speech -> auto-stop
+          if(now-t0>20000){ try{mediaRec&&mediaRec.stop();}catch(e){} }                                               // 20s hard cap
+        },120);
+      }catch(e){}   // VAD is best-effort; without it the manual click still works
     }catch(err){
       mic.classList.remove('on');
       const m = err&&err.name==='NotAllowedError' ? tr('micDenied')
