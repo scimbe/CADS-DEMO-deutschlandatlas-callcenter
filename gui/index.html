@@ -260,6 +260,19 @@
     // only kick in after a real wait (>1.2s) so quick gaps between fast clips don't blip a half-word
     fillerTimer=setTimeout(()=>{ fillerTimer=null; if(userPaused||seqBusy)return; fillerActive=true; fillerEl.onended=()=>{ if(fillerActive&&!userPaused) playFiller(); }; playFiller(); },1200); }
   function stopFillerLoop(){ if(fillerTimer){clearTimeout(fillerTimer);fillerTimer=null;} if(!fillerActive)return; fillerActive=false; fillerEl.onended=null; stopFiller(); }
+  // Let an in-flight filler finish its sentence instead of cutting it off mid-word the instant a
+  // real clip becomes ready -- a hard stopFiller() there felt like the caller was rudely interrupted.
+  // Stops the CHAINING (no new filler starts) but lets the current one play out, capped at 4s so a
+  // stuck 'ended' event can never delay the real answer indefinitely.
+  function stopFillerLoopGraceful(cb){
+    if(fillerTimer){clearTimeout(fillerTimer);fillerTimer=null;}
+    if(!fillerActive){ cb(); return; }
+    fillerActive=false;
+    if(fillerEl.paused||fillerEl.ended){ fillerEl.onended=null; cb(); return; }
+    let settled=false; const settle=()=>{ if(settled)return; settled=true; fillerEl.onended=null; cb(); };
+    fillerEl.onended=settle;
+    setTimeout(settle,4000);
+  }
 
   const STATUS=()=>[tr('status0'),tr('status1'),tr('status2'),tr('status3')];
   let statusTimer=null,tickTimer=null,t0=0;
@@ -311,7 +324,8 @@
     if(!it.ready){ if(it.optional){ setState('done'); speaking=false; stopFillerLoop(); return; }   // optional tail slot (follow-up invite): don't filler-bridge it — go quiet, it plays when ready
       startFillerLoop(); return; }             // preserve order: never skip ahead of an unfilled slot — but bridge the wait with spoken fillers
     if(!it.url){ it.played=true; pump(); return; }          // filled but silent -> skip to next
-    stopFillerLoop();                                       // a real ordered clip is about to play -> silence the filler
+    if(fillerActive){ seqBusy=true; stopFillerLoopGraceful(()=>{ seqBusy=false; pump(); }); return; }   // finish the filler sentence first ("rude interruption" fix), then re-run pump() to actually start the real clip
+    stopFillerLoop();                                       // no filler was actively playing -> nothing to wait for
     seqBusy=true; it.played=true; speaking=true; try{player.muted=false;}catch(e){} showCtl(); setState('speak'); replay.style.display='none';
     let started=false, advanced=false;
     // never let the queue hang on one clip: if it ends, errors, or its play() is rejected (e.g. a
