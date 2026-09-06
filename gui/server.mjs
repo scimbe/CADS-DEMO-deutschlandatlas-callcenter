@@ -187,10 +187,10 @@ function ttsChannel(text, voice = 'primary') {
       `CT_CHANNEL_ROLE=initiate CT_CHANNEL_CALL_SERVICE=audio_generation CT_CHANNEL_CALL_PERSISTENT=${process.env.CC_CALL_PERSISTENT || '0'} CT_CHANNEL_RELAY_ONLY=1 ` +
       `CT_CHANNEL_ID="${process.env.CT_AUDIO_CHANNEL_ID}" CT_CHANNEL_GRANT="$CT_CHANNEL_GRANT_2E" CT_CHANNEL_HOLDER_KEY="$CT_CHANNEL_HOLDER_KEY" CT_CHANNEL_NOISE_KEY="$CT_CHANNEL_NOISE_KEY" ` +
       `CT_CHANNEL_FRONT_DOOR=bunsenbrenner.org:443 CT_CHANNEL_FRONT_DOOR_CERT="$CT_CHANNEL_FRONT_DOOR_CERT" CT_CHANNEL_FRONT_DOOR_ONLY=1 ` +
-      `CT_CHANNEL_BROKER=bunsenbrenner.org:4435 CT_CHANNEL_RELAY=bunsenbrenner.org:4436 "$CT_AGENT_BIN" channel 2>/dev/null | tail -1`],
-      { env: process.env });
+      `CT_CHANNEL_BROKER=bunsenbrenner.org:4435 CT_CHANNEL_RELAY=bunsenbrenner.org:4436 "$CT_AGENT_BIN" channel 2>/dev/null`],
+      { env: process.env, detached: true });
     let out = '', done = false;
-    const finish = (url) => { if (done) return; done = true; clearTimeout(timer); try { p.kill('SIGKILL'); } catch {} resolve(url); };
+    const finish = (url) => { if (done) return; done = true; clearTimeout(timer); try { process.kill(-p.pid, 'SIGKILL'); } catch {} resolve(url); };
     // A channel call must NEVER hang the whole answer: if the edge stalls (e.g. the grant is not yet a
     // valid member -> [not-member], or the flaky tunnel), time out and resolve null so ttsSpeak falls
     // back to local Piper. Without this, a stalled channel call left TTS silent ("höre nichts").
@@ -375,9 +375,9 @@ function sttChannel(audioUrl, lang = 'de') {
       `CT_CHANNEL_ID="${process.env.CT_AUDIO_CHANNEL_ID}" CT_CHANNEL_GRANT="$CT_CHANNEL_GRANT_2E" CT_CHANNEL_HOLDER_KEY="$CT_CHANNEL_HOLDER_KEY" CT_CHANNEL_NOISE_KEY="$CT_CHANNEL_NOISE_KEY" ` +
       `CT_CHANNEL_FRONT_DOOR=bunsenbrenner.org:443 CT_CHANNEL_FRONT_DOOR_CERT="$CT_CHANNEL_FRONT_DOOR_CERT" CT_CHANNEL_FRONT_DOOR_ONLY=1 ` +
       `CT_CHANNEL_BROKER=bunsenbrenner.org:4435 CT_CHANNEL_RELAY=bunsenbrenner.org:4436 "$CT_AGENT_BIN" channel 2>/dev/null`],
-      { env: process.env });
+      { env: process.env, detached: true });
     let out = '', done = false;
-    const finish = (t) => { if (done) return; done = true; clearTimeout(timer); try { p.kill('SIGKILL'); } catch {} resolve(t); };
+    const finish = (t) => { if (done) return; done = true; clearTimeout(timer); try { process.kill(-p.pid, 'SIGKILL'); } catch {} resolve(t); };
     const timer = setTimeout(() => finish(null), Number(process.env.CC_CHANNEL_TIMEOUT_MS) || 30000);
     p.stdout.on('data', (d) => (out += d));
     p.on('close', () => { const t = (out || '').replace(/\s+/g, ' ').trim(); finish(t && !/^ERROR:/i.test(t) ? t : null); });
