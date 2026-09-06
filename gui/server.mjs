@@ -995,6 +995,11 @@ const server = createServer(async (req, res) => {
     // behind 3-9 throwaway speculative synths.
     let audioUrl = null;
     if (r.ok && r.answer) { try { audioUrl = proxied(await ttsSpeak(r.answer, 'primary', true)); } catch {} }
+    // Data can be fully ok (r.ok, real text) while ttsSpeak still comes back null -- e.g. the channel is
+    // down AND Piper itself glitches (spawn error, model missing). Previously that was invisible: the
+    // client just silently skipped the answer slot (fill(sA,null) -> pump moves on), so a caller heard
+    // dead air where the answer should be with zero signal why. Flag it so the client can show it.
+    const ttsFailed = !!(r.ok && r.answer && !audioUrl);
     trace('answer', { query, ok: r.ok, table: r.meta && r.meta.table, has_real_data: r.meta && r.meta.has_real_data, rows: r.meta && r.meta.live_rows_used, reused: r.reused, err: r.err });
     produceNextN1(r.meta && (r.meta.place_resolved || r.meta.place_name_requested));   // K1: content-linked "wussten Sie schon" for the NEXT round's instant N1 bridge (background)
     // warm follow-up candidates in the background so /followup can validate them from cache (some cities have no data)
@@ -1002,7 +1007,7 @@ const server = createServer(async (req, res) => {
       const place = placeFromQuery(query) || r.meta.place_name_requested || r.meta.place_resolved || '';
       swapCityFollowups(query, place, 3).forEach((s) => { answerFor(s, false); });   // fire-and-forget DATA speculation (no TTS)
     }
-    return jsonRes(res, r.ok ? 200 : 502, { query, ...r, audioUrl });
+    return jsonRes(res, r.ok ? 200 : 502, { query, ...r, audioUrl, ttsFailed });
   }
   if (req.method === 'POST' && req.url === '/followup') {
     const b = await readBody(req);
