@@ -435,26 +435,34 @@
   // funfact toggle: always SHOW a fact when one plays, maybe don't SPEAK it (checkbox); every other
   // filler kind is always spoken.
   function speakFillerKind(kind){ return kind!=='funfact' || speakFunfact(); }
-  // Resolves once slot `s` has been handed to the player (pump() sets `played=true` the instant it
-  // STARTS handling a slot, before/as it begins playing -- see pump() below) -- used to time the next
-  // filler fetch so its network round-trip overlaps the current clip's playback instead of adding a gap.
-  function waitPlayed(s){ return new Promise((res)=>{ const iv=setInterval(()=>{ if(s.played){ clearInterval(iv); res(); } },120); }); }
-  // The open-ended filler loop (dialog-fsm.mjs invariant I10): keep queuing ONE more filler at a time
-  // for as long as `awaitingAnswer` is true, stopping the INSTANT the real answer is ready -- whatever
-  // filler is already playing/queued still finishes (I1), but no further filler is requested after
-  // that, so a fast answer sees fewer (or zero) fillers instead of a fixed padded set. `preFetched`
-  // optionally supplies already-in-flight filler promises (from a speculative prefetch -- see ask()/
-  // doFollowup()) for the first slots instead of firing a fresh request for them.
+  // The open-ended filler loop (dialog-fsm.mjs invariant I10): keep a small LOOKAHEAD of filler
+  // requests already in flight, refilling it as each resolves, for as long as `awaitingAnswer` is true
+  // -- stopping the INSTANT the real answer is ready (whatever filler is already playing/queued still
+  // finishes, I1, but no further filler is requested after that, so a fast answer sees fewer, or zero,
+  // fillers instead of a fixed padded set).
+  //
+  // 2026-09 fix ("alles wird sequentiell gemacht" feedback): this used to fetch ONE filler, wait for it
+  // to actually START PLAYING, and only THEN fetch the next -- so every filler paid a full client<->
+  // server round trip (plus the server's own TTS-channel synth time) back to back, with the channel
+  // sitting briefly idle between requests waiting for the client to ask again. Now up to LOOKAHEAD
+  // requests are fired concurrently and slots are created in ORDER upfront (so playback order is fixed
+  // by creation order, not by which fetch happens to resolve first) -- the server's chanLimit=1 queue
+  // (see gui/server.mjs) can then process them back-to-back with zero client-round-trip gap in between,
+  // so as much audio as possible is already sitting in the queue by the time it's actually needed. This
+  // relies on /filler now marking all filler TTS as LOW priority (see that route) so this buffering
+  // never causes a filler to outrank / delay the real answer's own (high-priority) TTS call.
+  const FILLER_LOOKAHEAD=2;
   async function runFillerLoop(query, preFetched){
+    const inFlight=[];   // [{s, p}] in playback order
     let n=1;
-    while(awaitingAnswer){
-      const s=slot();
-      const f=await ((preFetched&&preFetched[n-1])||fetchFiller(query,n));
+    function launch(){ const s=slot(); const p=(preFetched&&preFetched[n-1])||fetchFiller(query,n); n++; inFlight.push({s,p}); }
+    for(let i=0;i<FILLER_LOOKAHEAD && awaitingAnswer;i++) launch();
+    while(inFlight.length){
+      const {s,p}=inFlight.shift();
+      const f=await p;
       if(f&&f.kind==='funfact'&&f.text) showFunfact(f);
       fill(s, (f&&f.audioUrl&&speakFillerKind(f.kind))?f.audioUrl:null);
-      n++;
-      if(!awaitingAnswer) break;
-      await waitPlayed(s);
+      if(awaitingAnswer) launch();   // top the buffer back up to LOOKAHEAD -- still only while it's actually needed
     }
   }
 

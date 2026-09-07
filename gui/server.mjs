@@ -1086,9 +1086,14 @@ const server = createServer(async (req, res) => {
     const b = await readBody(req);
     const q = (b.query || '').toString().slice(0, 300);
     const n = Math.max(1, Math.trunc(Number(b.n)) || 1);
+    // priority=false (background/lo) for every filler kind, deliberately: fillers exist ONLY to bridge
+    // the wait, so they must NEVER outrank the real answer's own ttsSpeak() call (priority=true, /answer
+    // route) for the shared chanLimit=1 channel slot. Before this fix both used priority=true and
+    // competed FIFO in the SAME hi-priority queue, so a filler that happened to be queued first could
+    // delay the real answer's audio -- reported live as everything feeling serialized/blocking.
     if (n === 1) {
       const text = stripPronunciation(verstehenText(q, userKey));
-      let au = null; try { au = await ttsSpeak(text, 'primary', true, false, userKey); } catch {}
+      let au = null; try { au = await ttsSpeak(text, 'primary', false, false, userKey); } catch {}
       return jsonRes(res, 200, { kind: 'verstehen', text, audioUrl: proxied(au) });
     }
     if (n === 2) {
@@ -1096,7 +1101,7 @@ const server = createServer(async (req, res) => {
       const ff = await wikiFunFact(place);
       if (ff && ff.text) {
         const text = stripPronunciation(await narrate(ff.text, 'funfact'));
-        let au = null; try { au = await ttsSpeak(text, 'primary', true, false, userKey); } catch {}
+        let au = null; try { au = await ttsSpeak(text, 'primary', false, false, userKey); } catch {}
         return jsonRes(res, 200, { kind: 'funfact', text, audioUrl: proxied(au), title: ff.title, url: ff.url });
       }
       return jsonRes(res, 200, { kind: 'funfact', text: null, audioUrl: null });   // no fact for this place -> silent, skipped instantly
@@ -1106,7 +1111,7 @@ const server = createServer(async (req, res) => {
     const gap = pickGap();
     let text, au;
     if (gap) { text = gap.text; au = gap.audioUrl; }
-    else { text = stripPronunciation(GAP_TEXTS[(rotFor(userKey).generic++) % GAP_TEXTS.length]); try { au = await ttsSpeak(text, 'primary', true, false, userKey); } catch {} }
+    else { text = stripPronunciation(GAP_TEXTS[(rotFor(userKey).generic++) % GAP_TEXTS.length]); try { au = await ttsSpeak(text, 'primary', false, false, userKey); } catch {} }
     return jsonRes(res, 200, { kind: 'generic', text, audioUrl: proxied(au) });
   }
   if (req.method === 'POST' && req.url === '/intro') {
