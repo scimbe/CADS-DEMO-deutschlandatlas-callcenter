@@ -128,7 +128,7 @@ function rotFor(userKey) {
       for (const [k, v] of rotState) if (v.ts < cutoff) rotState.delete(k);
       if (rotState.size >= ROT_MAX) rotState.delete(rotState.keys().next().value);
     }
-    r = { greet: 0, ack: 0, verstehen: 0, intro: 0, invite: 0, ts: Date.now() };
+    r = { greet: 0, ack: 0, verstehen: 0, intro: 0, invite: 0, generic: 0, ts: Date.now() };
     rotState.set(key, r);
   }
   r.ts = Date.now();
@@ -714,8 +714,11 @@ async function prewarmBridge() {
   }
   return fail;
 }
-// K1 -> N1: right after each answer, produce the NEXT round's "wussten Sie schon" in the BACKGROUND,
-// content-linked to the place just answered, so it is ready as instant N1 when the next question comes.
+// Dormant as of the 2026-09 filler-loop redesign: /filler now fetches a real Wikipedia fact LIVE at
+// its n=2 slot (see that route), so pre-stocking one in the background is no longer needed and would
+// just waste a wiki+narrate+TTS call (and chanLimit=1 contention) on a queue nothing reads anymore.
+// Left defined (not deleted) along with bridgeN1Queue/pickBridge/bridgeF1/prewarmBridge/BRIDGE_FACTS in
+// case a future slot (e.g. instant content for the very first BRIDGE) wants a pre-produced pool again.
 async function produceNextN1(place) {
   if (!place) return;
   if (bridgeN1Queue.length >= 2) return;   // already stocked -> don't fire a contending wiki+narrate+TTS after EVERY answer (feeds the chanLimit=1 starvation)
@@ -730,18 +733,20 @@ async function produceNextN1(place) {
 }
 // Pick the pre-produced bridge to speak while the answer computes: prefer the content-linked N1 from a
 // prior round, else a generic F1 clip; null means the pool is not warm yet -> caller synthesizes live.
-// NOT called from /context's funfact slot as of 2026-09 (see that route's comment) -- the F1 fallback
-// broke the "always a real fact" invariant and caused a "fetching data" phrase to repeat right after
-// the GAP clip. Kept defined + still prewarmed (prewarmLoop) in case bridgeF1 gets wired elsewhere,
-// e.g. as a P1 BRIDGE (/intro) variant.
+// NOT called anywhere as of the 2026-09 filler-loop redesign (previously not called from /context's
+// funfact slot either -- the F1 fallback broke the "always a real fact" invariant and caused a
+// "fetching data" phrase to repeat right after the GAP clip). Kept defined in case bridgeF1 gets wired
+// into a different slot later (e.g. the P1 BRIDGE /intro text); prewarmBridge() is no longer called at
+// boot either (see prewarmLoop), so bridgeF1 stays empty unless something starts calling it again.
 function pickBridge() {
   if (bridgeN1Queue.length) return bridgeN1Queue.shift();
   if (bridgeF1.length) return bridgeF1[bridgeRot++ % bridgeF1.length];
   return null;
 }
-// GAP = the operator-spec "Ich schaue in der Datenbank nach…" slot (replaces the live verstehen TTS).
-// Pre-produced at startup so /context carries NO live channel TTS at all -> it returns instantly and
-// stays out of the chanLimit=1 contention that otherwise queued it behind the answer + speculation.
+// GAP = the operator-spec "Ich schaue in der Datenbank nach…" slot -- used by /filler from n>=3
+// onward as the recurring "still looking it up" generic filler once verstehen (n=1) and a funfact
+// attempt (n=2) are done. Pre-produced at startup so it returns instantly and stays out of the
+// chanLimit=1 contention that would otherwise queue it behind the answer + speculation.
 const GAP_TEXTS = [
   'Einen Moment — ich schaue die aktuellen Zahlen im Deutschlandatlas für Sie nach.',
   'Ich frage die passenden Regionaldaten gerade live ab, einen kurzen Augenblick.',
@@ -761,21 +766,24 @@ async function prewarmGap() {
   }
   return fail;
 }
-// Self-healing prewarm: run all three pools once, and if any stayed incomplete (e.g. llm2's TTS channel
-// was slow/failing at boot -- the silent-empty-pool blind spot services hit), LOG LOUDLY and retry every
-// 120s until full. chanLimit=1 keeps this gentle; idempotent warmers only fill the gaps. Once llm2
-// recovers the pools populate on their own, no container restart needed.
+// Self-healing prewarm: run the two ACTIVE pools once (greetings, generic filler), and if either stayed
+// incomplete (e.g. llm2's TTS channel was slow/failing at boot -- the silent-empty-pool blind spot
+// services hit), LOG LOUDLY and retry every 120s until full. chanLimit=1 keeps this gentle; idempotent
+// warmers only fill the gaps. Once llm2 recovers the pools populate on their own, no container restart
+// needed. prewarmBridge()/bridgeF1 is intentionally NOT run here as of the 2026-09 filler-loop redesign
+// -- nothing reads that pool anymore (see pickBridge()'s comment), so warming it would just waste boot-
+// time TTS calls.
 let prewarming = false;
 async function prewarmLoop() {
   if (prewarming) return; prewarming = true;
-  try { await prewarmGreetings(); await prewarmBridge(); await prewarmGap(); }
+  try { await prewarmGreetings(); await prewarmGap(); }
   catch (e) { console.error('[prewarm] cycle error:', e && e.message); }
   finally { prewarming = false; }
-  const g = greetingCache.size, f = bridgeF1.length, p = gapPool.length;
-  if (g >= GREETINGS.length && f >= BRIDGE_FACTS.length && p >= GAP_TEXTS.length) {
-    console.log(`[prewarm] all pools warm (greetings=${g}, bridge=${f}, gap=${p})`);
+  const g = greetingCache.size, p = gapPool.length;
+  if (g >= GREETINGS.length && p >= GAP_TEXTS.length) {
+    console.log(`[prewarm] all pools warm (greetings=${g}, gap=${p})`);
   } else {
-    console.error(`[prewarm] INCOMPLETE greetings=${g}/${GREETINGS.length} bridge=${f}/${BRIDGE_FACTS.length} gap=${p}/${GAP_TEXTS.length} — llm2 TTS channel likely slow/failing; /greeting+/context fall back to LIVE synth until this fills. Retrying in 120s.`);
+    console.error(`[prewarm] INCOMPLETE greetings=${g}/${GREETINGS.length} gap=${p}/${GAP_TEXTS.length} — llm2 TTS channel likely slow/failing; /greeting+/filler fall back to LIVE synth until this fills. Retrying in 120s.`);
     setTimeout(prewarmLoop, 120000);
   }
 }
@@ -1040,43 +1048,45 @@ const server = createServer(async (req, res) => {
     const text = await sttSpeak(Buffer.concat(chunks), base);
     return jsonRes(res, 200, { text });
   }
-  if (req.method === 'POST' && req.url === '/context') {
-    // fast, pre-answer parts (no ArcGIS pipeline): part 1 "Verstehen" (confirm the question) + part 3
-    // "Wussten Sie schon" (a VARIED, fresh Wikipedia fact). Filled into the ordered speech queue on the client.
+  if (req.method === 'POST' && req.url === '/filler') {
+    // Open-ended filler loop (2026-09 redesign, replaces the old fixed two-slot /context): the client
+    // calls this once per additional filler it needs, with an incrementing `n` (1-based; n=0/the first
+    // spoken part is the BRIDGE, still served by /intro, unchanged), for as long as the real /answer
+    // has not resolved yet. Content by position, per dialog-fsm.mjs's FILLER_KIND / invariant I4:
+    //   n=1 -> a "Verstanden: <question>" echo (kind=verstehen)
+    //   n=2 -> a REAL, place-linked Wikipedia fact, never a generic stand-in (kind=funfact; null/silent
+    //          if this place has no fact -- the client's queue skips a silent slot instantly, so the
+    //          loop just moves straight on to the next filler rather than showing a fake fact)
+    //   n>=3 -> a generic "still looking it up" phrase, rotating through the prewarmed GAP_TEXTS pool
+    //          (kind=generic)
+    // The client stops calling this the instant /answer resolves (I10), so a fast answer only ever
+    // gets however many of these it had time for -- often zero or one, never a fixed padded set.
     const userKey = userKeyFor(req);
     const b = await readBody(req);
     const q = (b.query || '').toString().slice(0, 300);
-    const place = placeFromQuery(q) || q;
-    let vtext, vau = null, funfact = null;
-    // Both preamble slots are now PRE-PRODUCED so /context carries NO live channel TTS (operator spec):
-    // verstehen -> a "looking it up" GAP clip; funfact -> the N1 bridge (a REAL, place-linked Wikipedia
-    // fact produced right after the previous answer -- see produceNextN1). This takes /context out of
-    // the chanLimit=1 contention entirely. Live synthesis only if a pool isn't warm yet (startup window).
-    //
-    // bridgeF1 is deliberately NOT used here (was until 2026-09): it holds GENERIC "I'm looking up your
-    // data" bridging text, not a fact, and FSM invariant I4 requires "Wussten Sie schon" to always be a
-    // real, Wikipedia-sourced fact. Falling back to F1 broke that invariant on almost every turn (N1 is
-    // rarely stocked with 2+ items, so pickBridge()'s F1 fallback dominated in practice) AND produced a
-    // "loop" symptom live callers reported: GAP ("Ich schaue die Zahlen nach...") immediately followed
-    // by an F1 clip saying essentially the same thing ("Ich frage Ihre Werte live ab...") instead of an
-    // actual fact -- two near-identical "fetching data" phrases back to back, never a real "Wussten Sie
-    // schon". bridgeF1/prewarmBridge/pickBridge are left in place (unused here) in case they get wired
-    // into a different slot (e.g. the P1 BRIDGE /intro text) later.
-    const gap = pickGap();
-    const pre = bridgeN1Queue.length ? bridgeN1Queue.shift() : null;
-    if (gap) { vtext = gap.text; vau = gap.audioUrl; }
-    else { vtext = stripPronunciation(verstehenText(q, userKey)); await ttsSpeak(vtext, 'primary', true, false, userKey).then((u) => { vau = u; }, () => {}); }
-    if (pre) {
-      funfact = { ...pre, audioUrl: proxied(pre.audioUrl) };
-    } else {
+    const n = Math.max(1, Math.trunc(Number(b.n)) || 1);
+    if (n === 1) {
+      const text = stripPronunciation(verstehenText(q, userKey));
+      let au = null; try { au = await ttsSpeak(text, 'primary', true, false, userKey); } catch {}
+      return jsonRes(res, 200, { kind: 'verstehen', text, audioUrl: proxied(au) });
+    }
+    if (n === 2) {
+      const place = placeFromQuery(q) || q;
       const ff = await wikiFunFact(place);
       if (ff && ff.text) {
-        const ftext = stripPronunciation(await narrate(ff.text, 'funfact'));
-        let fau = null; await ttsSpeak(ftext, 'primary', true, false, userKey).then((u) => { fau = u; }, () => {});
-        funfact = { ...ff, text: ftext, audioUrl: proxied(fau) };
+        const text = stripPronunciation(await narrate(ff.text, 'funfact'));
+        let au = null; try { au = await ttsSpeak(text, 'primary', true, false, userKey); } catch {}
+        return jsonRes(res, 200, { kind: 'funfact', text, audioUrl: proxied(au), title: ff.title, url: ff.url });
       }
+      return jsonRes(res, 200, { kind: 'funfact', text: null, audioUrl: null });   // no fact for this place -> silent, skipped instantly
     }
-    return jsonRes(res, 200, { verstehen: { text: vtext, audioUrl: proxied(vau) }, funfact });
+    // n >= 3: generic, prewarmed pool first (instant); live fallback (still per-caller rotated) only
+    // during the narrow startup window before prewarmGap() has finished.
+    const gap = pickGap();
+    let text, au;
+    if (gap) { text = gap.text; au = gap.audioUrl; }
+    else { text = stripPronunciation(GAP_TEXTS[(rotFor(userKey).generic++) % GAP_TEXTS.length]); try { au = await ttsSpeak(text, 'primary', true, false, userKey); } catch {} }
+    return jsonRes(res, 200, { kind: 'generic', text, audioUrl: proxied(au) });
   }
   if (req.method === 'POST' && req.url === '/intro') {
     // part 2 "Überbrücken" — prepared in advance by the client (first turn: service intro; later: bridge)
@@ -1117,7 +1127,9 @@ const server = createServer(async (req, res) => {
     let audioUrl = null;
     if (r.ok && r.answer) { try { audioUrl = proxied(await ttsSpeak(r.answer, 'primary', true, false, userKey)); } catch {} }
     trace('answer', { query, ok: r.ok, table: r.meta && r.meta.table, has_real_data: r.meta && r.meta.has_real_data, rows: r.meta && r.meta.live_rows_used, reused: r.reused, err: r.err });
-    produceNextN1(r.meta && (r.meta.place_resolved || r.meta.place_name_requested));   // K1: content-linked "wussten Sie schon" for the NEXT round's instant N1 bridge (background)
+    // produceNextN1() is no longer called here (2026-09 filler-loop redesign): /filler now fetches the
+    // Wikipedia fact LIVE at its n=2 slot, so pre-stocking one in the background would just waste a
+    // wiki+narrate+TTS call on a queue nothing reads anymore (see produceNextN1()'s own comment).
     // warm follow-up candidates in the background so /followup can validate them from cache (some cities have no data)
     if (r.ok && r.meta && r.meta.table && r.meta.has_real_data !== false) {
       const place = placeFromQuery(query) || r.meta.place_name_requested || r.meta.place_resolved || '';

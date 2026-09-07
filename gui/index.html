@@ -278,12 +278,14 @@
   function showCtl(){playctl.classList.add('active');}
   function hideCtl(){playctl.classList.remove('active');userPaused=false;pauseBtn.textContent=tr('pause');}
 
-  // Ordered sequential speech queue: a turn is spoken in FIXED order, each part ALWAYS finishing
-  // before the next (never cut off): 1 Verstehen - 2 Ueberbruecken - 3 Wussten Sie schon -
-  // 4 Atlas-Antwort - 5 Follow-up-Einladung. Slots are created in order and filled as each part
-  // becomes ready (prepared in parallel); the one player advances only once the current clip ENDED
-  // and the next slot is filled, so order holds and nothing is interrupted (even when the real
-  // answer arrives during an earlier clip).
+  // Ordered sequential speech queue: a turn is spoken in order, each part ALWAYS finishing before the
+  // next (never cut off): Ueberbruecken (bridge) -> an OPEN-ENDED filler loop (0..N clips: Verstehen,
+  // then a real place-linked fact, then generic "still looking" variants -- see runFillerLoop) that
+  // keeps going only as long as the real answer isn't ready yet -> Atlas-Antwort -> Follow-up-Einladung.
+  // See gui/dialog-fsm.mjs (2026-09 redesign) for the canonical spec. Slots are created as each part is
+  // decided and filled once it's ready (prepared in parallel); the one player advances only once the
+  // current clip ENDED and the next slot is filled, so order holds and nothing is interrupted (even
+  // when the real answer arrives during an earlier clip).
   let seq=[], seqBusy=false;
   // FSM invariant I1 ("ordered/non-interruptible: P1..P5 always play to the end") was being violated
   // here: submitting a new question (or clicking a follow-up bubble) called newTurn() immediately, which
@@ -427,7 +429,34 @@
     }
     turnCount++;
   }
-  function fetchContext(query){ return fetch('/context',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({query})}).then(r=>r.json()).catch(()=>null); }
+  // /filler: one clip at a time, n=1 Verstehen, n=2 a real place-linked fact, n>=3 generic (see
+  // gui/server.mjs's /filler route + gui/dialog-fsm.mjs FILLER_KIND).
+  function fetchFiller(query,n){ return fetch('/filler',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({query,n})}).then(r=>r.json()).catch(()=>null); }
+  // funfact toggle: always SHOW a fact when one plays, maybe don't SPEAK it (checkbox); every other
+  // filler kind is always spoken.
+  function speakFillerKind(kind){ return kind!=='funfact' || speakFunfact(); }
+  // Resolves once slot `s` has been handed to the player (pump() sets `played=true` the instant it
+  // STARTS handling a slot, before/as it begins playing -- see pump() below) -- used to time the next
+  // filler fetch so its network round-trip overlaps the current clip's playback instead of adding a gap.
+  function waitPlayed(s){ return new Promise((res)=>{ const iv=setInterval(()=>{ if(s.played){ clearInterval(iv); res(); } },120); }); }
+  // The open-ended filler loop (dialog-fsm.mjs invariant I10): keep queuing ONE more filler at a time
+  // for as long as `awaitingAnswer` is true, stopping the INSTANT the real answer is ready -- whatever
+  // filler is already playing/queued still finishes (I1), but no further filler is requested after
+  // that, so a fast answer sees fewer (or zero) fillers instead of a fixed padded set. `preFetched`
+  // optionally supplies already-in-flight filler promises (from a speculative prefetch -- see ask()/
+  // doFollowup()) for the first slots instead of firing a fresh request for them.
+  async function runFillerLoop(query, preFetched){
+    let n=1;
+    while(awaitingAnswer){
+      const s=slot();
+      const f=await ((preFetched&&preFetched[n-1])||fetchFiller(query,n));
+      if(f&&f.kind==='funfact'&&f.text) showFunfact(f);
+      fill(s, (f&&f.audioUrl&&speakFillerKind(f.kind))?f.audioUrl:null);
+      n++;
+      if(!awaitingAnswer) break;
+      await waitPlayed(s);
+    }
+  }
 
   // phase 1 - understand & guide (targeted clarifying question; speculation starts server-side)
   async function ask(){
@@ -440,7 +469,7 @@
     // the usual bridge (both fill the wait during understand; the ack additionally acknowledges the switch).
     if(pivot && nextTopicAck && nextTopicAck.audioUrl){ const s=slot(); fill(s, nextTopicAck.audioUrl); nextTopicAck=null; turnCount++; prepareTopicAck(); }
     else startBridge();                    // Ueberbruecken plays right away -> no dead air during understand
-    const ctxP=fetchContext(query);        // speculative: Verstehen + Fun-Fact compute in parallel with /understand
+    const preFillers=[fetchFiller(query,1), fetchFiller(query,2)];   // speculative: Verstehen + fact, in parallel with /understand
     qEcho.innerHTML='<span>'+tr('qYour')+'</span> <b></b>'; qEcho.querySelector('b').textContent=query;
     setState('listen'); aEl.className='a working'; aEl.textContent=tr('understanding');
     setTimeout(()=>setState('think'),500);
@@ -449,7 +478,7 @@
       const u=await (await fetch('/understand',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({query,context:{history,lastQuery,lastAnswer,pending:sentPending,slots:slotsDS}})})).json();
       go.disabled=false; q.disabled=false;
       if(u.slots) slotsDS={ort:u.slots.ort||slotsDS.ort, indikator:u.slots.indikator||slotsDS.indikator};
-      if(u.precise){ pending=null; deliver(u.best_guess, u.kind==='anschluss'||u.kind==='klarstellung', {continued:true, ctxP:(u.best_guess===query?ctxP:null)}); return; }
+      if(u.precise){ pending=null; deliver(u.best_guess, u.kind==='anschluss'||u.kind==='klarstellung', {continued:true, preFillers:(u.best_guess===query?preFillers:null)}); return; }
       awaitingAnswer=false; stopFillerLoop();   // a clarify question (not a long answer) is now spoken -> no more bridging
       pending={clarify:u.clarify||'', best_guess:u.best_guess||'', options:u.options||[], original:query};
       setState('idle');
@@ -462,7 +491,9 @@
     }catch(e){awaitingAnswer=false;stopFillerLoop();go.disabled=false;q.disabled=false;stopWait();aEl.className='a';aEl.textContent=tr('connError')+e.message;setState('done');}
   }
 
-  // phase 2 - deliver: Ueberbruecken (already playing) -> Verstehen -> Wussten Sie schon -> Antwort, all in order
+  // phase 2 - deliver: Ueberbruecken (already playing) -> open-ended filler loop -> Antwort -> Follow-up,
+  // all in order (dialog-fsm.mjs, 2026-09 redesign: the filler loop runs CONCURRENTLY with /answer and
+  // stops issuing new fillers the instant /answer resolves, so it never pads a fast answer).
   async function deliver(query, isFollowup, opts){
     opts=opts||{};
     unlockAudio(); pending=null; followupActive=false;   // a delivered/clicked answer is not a topic pivot
@@ -471,14 +502,7 @@
     if(!opts.continued){ reset(); newTurn(); startBridge(); }   // fresh turn (bubble click): bridge plays immediately
     qEcho.innerHTML='<span>'+(isFollowup?tr('qFollow'):tr('qQuestion'))+'</span> <b></b>'; qEcho.querySelector('b').textContent=query;
     aEl.className='a working'; aEl.textContent=tr('fetching'); setState('query'); startWait();
-    const sV=slot(), sF=slot(), sA=slot();      // Verstehen, Wussten Sie schon, Antwort (Ueberbruecken already queued)
-    const ctxP=opts.ctxP||fetchContext(query);
-    ctxP.then(c=>{
-      if(!c){ fill(sV,null); fill(sF,null); return; }
-      fill(sV, (c.verstehen)?c.verstehen.audioUrl:null);
-      if(c.funfact&&c.funfact.text){ showFunfact(c.funfact); fill(sF, speakFunfact()?c.funfact.audioUrl:null); }
-      else fill(sF,null);
-    }).catch(()=>{ fill(sV,null); fill(sF,null); });
+    const fillerP=runFillerLoop(query, opts.preFillers);   // runs concurrently; self-stops once awaitingAnswer flips false below
     try{
       const d=await (await fetch('/answer',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({query})})).json();
       stopWait();
@@ -492,8 +516,9 @@
             srcTxt.innerHTML='<span class="pill">'+(m.table||'—')+'</span> <span class="pill">'+(m.place_resolved||m.place_name_requested||'')+'</span> <span class="pill">'+(m.live_rows_used||0)+tr('liveRows')+'</span>';}
         }
       });
-      awaitingAnswer=false;   // the answer slot is now in the queue -> normal ordered pump takes over
-      fill(sA, okA?d.audioUrl:null);
+      awaitingAnswer=false;   // I10: tell the filler loop to stop issuing new fillers
+      await fillerP;          // let it settle its already-in-flight last slot BEFORE the answer is queued, so order holds
+      const sA=slot(); fill(sA, okA?d.audioUrl:null);
       go.disabled=false; q.disabled=false;
       if(!okA){ followupActive=false; renderExamples(); setState('done'); return; }   // degrade cleanly on failure: no broken follow-up on a non-answer, offer examples instead of an empty state (finally still runs)
       lastQuery=query; lastAnswer=ans;
@@ -501,7 +526,7 @@
       if(history.length>6) history.shift();
       const sI=slot(); sI.optional=true;   // follow-up invite is nice-to-have: never bridge it with endless fillers — it plays when ready
       doFollowup(query, ans).then(u=>fill(sI, u));
-    }catch(e){awaitingAnswer=false;stopFillerLoop();stopWait();aEl.className='a';aEl.textContent=tr('connError')+e.message;setState('done');go.disabled=false;q.disabled=false;fill(sV,null);fill(sF,null);fill(sA,null);}
+    }catch(e){awaitingAnswer=false;await fillerP.catch(()=>{});stopFillerLoop();stopWait();aEl.className='a';aEl.textContent=tr('connError')+e.message;setState('done');go.disabled=false;q.disabled=false;const sA=slot();fill(sA,null);}
     finally{ prepareNextIntro(); prepareTopicAck(); }   // I5: refresh next bridge + new-topic ack on EVERY path
   }
 
@@ -514,16 +539,16 @@
         // Follow-up is phrased as a yes-question (see deriveInvite); we offer "Ja" plus concrete
         // alternatives, but deliberately NO "Nein" option — declining just means asking something new,
         // which the input field always allows. (operator: der Nutzer soll nur mit "ja" antworten können.)
-        // Bug#2 fix: pre-produce Verstehen + "Wussten Sie schon" for the MOST LIKELY follow-up NOW,
-        // while the caller is still listening to the current answer / deciding -- so a "Ja" plays it
-        // instantly instead of computing the Wikipedia fun fact + TTS reactively at click time.
-        const ctxP0=fetchContext(sug[0]);
+        // Bug#2 fix: pre-produce the first fillers (Verstehen + fact) for the MOST LIKELY follow-up
+        // NOW, while the caller is still listening to the current answer / deciding -- so a "Ja" plays
+        // them instantly instead of computing the Wikipedia fun fact + TTS reactively at click time.
+        const preFillers0=[fetchFiller(sug[0],1), fetchFiller(sug[0],2)];
         const items=[
           // Bug#1 fix: a "Ja" (and every offered follow-up) is a CONTINUATION, not a fresh turn --
           // pass continued:true so deliver() skips reset()/newTurn()/startBridge(). That means no
-          // replayed bridge intro and no cutting the still-playing invite; the pre-produced ctxP0
-          // feeds the "Ja" path so Verstehen + Wussten-Sie-schon are ready the instant it's clicked.
-          {label:'✓ Ja',best:true,onClick:()=>deliver(sug[0],true,{continued:true,ctxP:ctxP0})},
+          // replayed bridge intro and no cutting the still-playing invite; the pre-produced preFillers0
+          // feeds the "Ja" path so Verstehen + a fact are ready the instant it's clicked.
+          {label:'✓ Ja',best:true,onClick:()=>deliver(sug[0],true,{continued:true,preFillers:preFillers0})},
           ...sug.slice(1).map(s=>({label:s,onClick:()=>deliver(s,true,{continued:true})}))
         ];
         renderBubbles(items,'💬 '+(f.invite||tr('inviteFallback')));
