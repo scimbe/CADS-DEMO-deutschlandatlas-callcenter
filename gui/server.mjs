@@ -58,31 +58,100 @@ function trace(tag, obj) {
 // incident: a backlog of speculative + live requests spawned 8 concurrent Piper procs and drove the
 // 2-vCPU host to load 200+, making everything appear to hang. A priority queue runs user-facing work
 // (real /answer) before background speculation. Caps are env-tunable per host size.
-function makeLimiter(max) {
-  let active = 0; const hi = [], lo = [];
+//
+// Multi-user hardening (2026-09): two problems surface once several callers hit these limiters at
+// once. (1) No queue-depth cap -- a burst just grows the queue forever, which LOOKS like "hangs" from
+// the caller's side instead of a fast, clean "busy, retry" -- the same failure shape as the load-200
+// incident above, just via queue length instead of process count. (2) Plain FIFO serves jobs in
+// arrival order regardless of WHO queued them, so one caller's own burst of speculative work (the
+// normal, single-caller design) can crowd out a second caller's real-time turn. Both are fixed here
+// without touching any call site's contract: each queue is capped (rejects with a QUEUE_FULL error
+// past the cap -- every call site already treats a TTS/pipeline failure as "degrade gracefully", see
+// ttsSpeak()/answerFor()) and jobs are grouped by an opaque `userKey` (per-caller identity, usually the
+// client IP -- see userKeyFor()) and dequeued round-robin ACROSS keys, one job per key per round, so no
+// single caller can starve another's already-queued turn.
+function makeLimiter(max, { hiQueueMax = 40, loQueueMax = 24 } = {}) {
+  let active = 0;
+  const mkQueue = () => ({ order: [], byUser: new Map() });   // order: user keys in round-robin rotation
+  const hi = mkQueue(), lo = mkQueue();
+  const qlen = (q) => { let n = 0; for (const arr of q.byUser.values()) n += arr.length; return n; };
+  const enqueue = (q, userKey, job) => {
+    let arr = q.byUser.get(userKey);
+    if (!arr) { arr = []; q.byUser.set(userKey, arr); q.order.push(userKey); }
+    arr.push(job);
+  };
+  const dequeue = (q) => {
+    for (let i = 0; i < q.order.length; i++) {
+      const uk = q.order.shift();
+      const arr = q.byUser.get(uk);
+      if (!arr || !arr.length) { q.byUser.delete(uk); i--; continue; }
+      const job = arr.shift();
+      if (arr.length) q.order.push(uk); else q.byUser.delete(uk);
+      return job;
+    }
+    return null;
+  };
   const pump = () => {
     if (active >= max) return;
-    const job = hi.shift() || lo.shift(); if (!job) return;
+    const job = dequeue(hi) || dequeue(lo); if (!job) return;
     active++;
     Promise.resolve().then(job.task).then(job.resolve, job.reject).finally(() => { active--; pump(); });
   };
-  return (task, priority = false) => new Promise((resolve, reject) => { (priority ? hi : lo).push({ task, resolve, reject }); pump(); });
+  const limiter = (task, priority = false, userKey = 'anon') => new Promise((resolve, reject) => {
+    const q = priority ? hi : lo, cap = priority ? hiQueueMax : loQueueMax;
+    if (qlen(q) >= cap) { reject(Object.assign(new Error('limiter queue full'), { code: 'QUEUE_FULL' })); return; }
+    enqueue(q, userKey || 'anon', { task, resolve, reject }); pump();
+  });
+  limiter.stats = () => ({ active, max, hiQueued: qlen(hi), loQueued: qlen(lo), hiQueueMax, loQueueMax });
+  return limiter;
+}
+// Identify a caller for fairness + per-caller rotation state (no login/session cookie in this
+// protocol) -- best-effort from the request, falls back to 'anon' if nothing is available (all
+// anonymous callers then share one fairness/rotation bucket, same as the pre-fairness behaviour).
+function userKeyFor(req) {
+  const xf = (req && req.headers && req.headers['x-forwarded-for']) || '';
+  return xf.split(',')[0].trim() || (req && req.socket && req.socket.remoteAddress) || 'anon';
+}
+// Per-caller rotation state (variety counters) so concurrent callers no longer share/steal each
+// other's "next phrase" index -- previously a single global counter per phrase list, so caller B's
+// turn silently advanced caller A's rotation too (multi-user regression). Keyed by the same userKey as
+// the fairness queues above; bounded + idle-pruned like the other in-memory caches (TTS_DIR, specCache)
+// so it can never grow unboundedly with the number of distinct callers seen over the process lifetime.
+const ROT_MAX = 500, ROT_IDLE_MS = 2 * 3600 * 1000;
+const rotState = new Map();   // userKey -> { greet, ack, verstehen, intro, invite, ts }
+function rotFor(userKey) {
+  const key = userKey || 'anon';
+  let r = rotState.get(key);
+  if (!r) {
+    if (rotState.size >= ROT_MAX) {
+      const cutoff = Date.now() - ROT_IDLE_MS;
+      for (const [k, v] of rotState) if (v.ts < cutoff) rotState.delete(k);
+      if (rotState.size >= ROT_MAX) rotState.delete(rotState.keys().next().value);
+    }
+    r = { greet: 0, ack: 0, verstehen: 0, intro: 0, invite: 0, ts: Date.now() };
+    rotState.set(key, r);
+  }
+  r.ts = Date.now();
+  return r;
 }
 // Default 1: Piper is CPU-bound and even 2 concurrent synths saturate a 2-core host, making EACH job
 // ~10-30x slower (measured: 18-61s for 67-450 chars at cap 2). Serialising at cap 1 lets each clip
 // synth at full speed, so the caller hears each part sooner. Raise CC_PIPER_CONCURRENCY on a bigger host.
-const piperLimit = makeLimiter(Number(process.env.CC_PIPER_CONCURRENCY) || 1);   // CPU-bound TTS
-const pipeLimit = makeLimiter(Number(process.env.CC_PIPELINE_CONCURRENCY) || 3);  // pipeline runtime spawns
+const piperLimit = makeLimiter(Number(process.env.CC_PIPER_CONCURRENCY) || 1,
+  { hiQueueMax: Number(process.env.CC_PIPER_QUEUE_HI) || 40, loQueueMax: Number(process.env.CC_PIPER_QUEUE_LO) || 24 });   // CPU-bound TTS
+const pipeLimit = makeLimiter(Number(process.env.CC_PIPELINE_CONCURRENCY) || 3,
+  { hiQueueMax: Number(process.env.CC_PIPELINE_QUEUE_HI) || 40, loQueueMax: Number(process.env.CC_PIPELINE_QUEUE_LO) || 24 });  // pipeline runtime spawns
 // The llm2 audio_generation channel is a SINGLE-SLOT serve (one parked accept leg at a time). A real
 // turn fires 3 channel calls near-simultaneously -- verstehen + funfact (/context) and the answer
 // (/answer) -- which, unserialised, thrash the broker's park/re-park cycle: each call waits for the
 // serve to re-park, so 3 concurrent ~6s calls balloon to ~80s AND verstehen/funfact often exceed the
 // per-call timeout and come back null (never play). Serialising channel calls to 1 makes them run
 // back-to-back (~6s each, in play order) with no thrash. Env-tunable if llm2 ever gets multi-slot.
-const chanLimit = makeLimiter(Number(process.env.CC_CHANNEL_CONCURRENCY) || 1);
+const chanLimit = makeLimiter(Number(process.env.CC_CHANNEL_CONCURRENCY) || 1,
+  { hiQueueMax: Number(process.env.CC_CHANNEL_QUEUE_HI) || 40, loQueueMax: Number(process.env.CC_CHANNEL_QUEUE_LO) || 24 });
 
-function runPipeline(query, priority = false) {
-  return pipeLimit(() => _runPipelineNow(query), priority);
+function runPipeline(query, priority = false, userKey = 'anon') {
+  return pipeLimit(() => _runPipelineNow(query), priority, userKey);
 }
 function _runPipelineNow(query) {
   const t0 = Date.now();
@@ -150,7 +219,7 @@ function pruneTtsDir(keep = 100) {
     for (const { f } of files.slice(keep)) { try { unlinkSync(join(TTS_DIR, f)); } catch {} }
   } catch {}
 }
-function ttsLocalPiper(text, priority = true) {
+function ttsLocalPiper(text, priority = true, userKey = 'anon') {
   // gated through piperLimit so at most CC_PIPER_CONCURRENCY Piper procs run at once (else a burst
   // spawns dozens and thrashes a small host). User-facing TTS is high-priority; background work
   // (filler regeneration, speculation) passes priority=false so a real answer never waits behind it.
@@ -174,7 +243,7 @@ function ttsLocalPiper(text, priority = true) {
       p.on('close', (code) => { pruneTtsDir(); fin(code === 0 && existsSync(wav) ? '/tts/' + id + '.wav' : null); });
       p.on('error', () => fin(null));
     } catch { fin(null); }
-  }), priority);
+  }), priority, userKey);
 }
 
 // The llm2 agent `audio_generation` channel. Resolves to an https clip URL, or null on any failure
@@ -236,24 +305,28 @@ function streamChannelClip(url) {
   return '/tts-stream/' + id;
 }
 
-function ttsSpeak(text, voice = 'primary', priority = true, forceStream = false) {
+function ttsSpeak(text, voice = 'primary', priority = true, forceStream = false, userKey = 'anon') {
   text = stripPronunciation(text);
   if (process.env.CC_TTS !== '1') return Promise.resolve(null);
   // Production voice = the llm2 agent `audio_generation` channel (operator directive), CHANNEL-FIRST.
   // Local Piper, when configured, is an automatic RUNTIME fallback: if the channel call fails at
-  // request time (host can't reach it, spawn error, non-URL output), we synthesize with Piper instead
-  // so a delivered turn is never silent. With no channel env, Piper is used directly; with neither,
-  // TTS is a no-op. (Operator choice: "Channel + Piper-Fallback — nutzt den Channel wenn erreichbar,
-  // verstummt nie".)
+  // request time (host can't reach it, spawn error, non-URL output, OR the channel limiter's queue is
+  // full under multi-user load), we synthesize with Piper instead so a delivered turn is never silent.
+  // With no channel env, Piper is used directly; with neither, TTS is a no-op. (Operator choice:
+  // "Channel + Piper-Fallback — nutzt den Channel wenn erreichbar, verstummt nie".)
   const channelReady = process.env.CT_AGENT_BIN && process.env.CT_RELAY_ENV && process.env.CT_AUDIO_CHANNEL_ID;
   const piperReady = process.env.CC_PIPER_BIN && process.env.CC_PIPER_MODEL;
+  // never lets ttsSpeak reject -- a full Piper queue (also possible under multi-user load) degrades to
+  // silent (null) rather than propagating to a call site that isn't expecting a rejection.
+  const fallbackPiper = () => (piperReady ? ttsLocalPiper(text, priority, userKey).catch(() => null) : Promise.resolve(null));
   if (channelReady) {
     // serialise channel calls (chanLimit=1) so verstehen/funfact/answer don't thrash llm2's single-slot
-    // serve; the user-facing answer (priority=true) still jumps ahead of any low-priority prefetch.
-    return chanLimit(() => ttsChannel(text, voice), priority).then((url) => (url ? ((process.env.CC_TTS_STREAM === '1' && (priority || forceStream)) ? streamChannelClip(url) : localizeChannelClip(url)) : (piperReady ? ttsLocalPiper(text, priority) : null)));
+    // serve; the user-facing answer (priority=true) still jumps ahead of any low-priority prefetch, and
+    // fair round-robin (userKey) keeps one caller's background work from starving another's real turn.
+    return chanLimit(() => ttsChannel(text, voice), priority, userKey).catch(() => null)
+      .then((url) => (url ? ((process.env.CC_TTS_STREAM === '1' && (priority || forceStream)) ? streamChannelClip(url) : localizeChannelClip(url)) : fallbackPiper()));
   }
-  if (piperReady) return ttsLocalPiper(text, priority);
-  return Promise.resolve(null);
+  return fallbackPiper();
 }
 const proxied = (u) => (u ? (u.startsWith('/') ? u : '/audio?u=' + encodeURIComponent(u)) : null);
 
@@ -281,7 +354,7 @@ function synthOnce(f, text) {
       p.on('close', (code) => res(code === 0 && existsSync(f) && statSync(f).size > 0));
       p.on('error', () => res(false));
     } catch { res(false); }
-  }), false);
+  }), false, 'system');
 }
 
 async function ensureFillers() {
@@ -431,8 +504,7 @@ function swapCityFollowups(query, place, n) {
 // Gespräch an, varied so consecutive turns don't repeat, and ALWAYS ends as a clear closed
 // question so the one-click "Ja" bubble works. The concrete question core is derived from a
 // VALIDATED suggestion (guaranteed answerable); only the leading wrapper varies.
-let inviteRot = 0;
-function deriveInvite(q) {
+function deriveInvite(q, userKey = 'anon') {
   const s = (q || '').trim().replace(/\?+$/, '');
   let core = null;
   const m = s.match(/^wie\s+hoch\s+ist\s+(.+?)\s+in\s+(.+)$/i);
@@ -451,7 +523,7 @@ function deriveInvite(q) {
     `Ich führe Sie direkt weiter — soll ich nachsehen: ${s}?`,
     `Passend dazu: interessiert Sie auch: ${s}?`,
   ];
-  return leads[(inviteRot++) % leads.length];
+  return leads[(rotFor(userKey).invite++) % leads.length];
 }
 const WIKI_UA = { accept: 'application/json', 'user-agent': 'CADS-Demo-Callcenter/1.0 (https://bunsenbrenner.org)' };
 const factRotation = new Map();   // title -> next sentence offset, so repeats/similar places don't say the same thing
@@ -499,7 +571,7 @@ function diskGet(q) {
 }
 function diskPut(q, obj) { try { mkdirSync(Q_CACHE, { recursive: true }); writeFileSync(join(Q_CACHE, qKey(q) + '.json'), JSON.stringify({ ...obj, ts: Date.now() })); } catch {} }
 
-function answerFor(query, priority = false) {
+function answerFor(query, priority = false, userKey = 'anon') {
   const key = (query || '').trim();
   if (!key) return Promise.resolve({ ok: false, answer: null, meta: null, audioUrl: null, err: 'empty' });
   if (specCache.has(key)) return specCache.get(key);
@@ -509,7 +581,12 @@ function answerFor(query, priority = false) {
     if (cached && cached.answer && cached.meta) {           // reuse: same request ran before, data unchanged within TTL
       answer = cached.answer; meta = cached.meta; ok = true; reused = true;
     } else {
-      const r = await runPipeline(key, priority);           // real /answer jumps the queue ahead of speculation
+      let r;
+      // pipeLimit can now reject with QUEUE_FULL under multi-user load (see makeLimiter) -- turn that
+      // into a normal {ok:false} result instead of letting it reject this (cached, widely-awaited)
+      // promise, so every existing call site's plain `await answerFor(...)` keeps working unchanged.
+      try { r = await runPipeline(key, priority, userKey); }   // real /answer jumps the queue ahead of speculation
+      catch (e) { r = { ok: false, final: null, err: (e && e.code) || (e && e.message) || 'pipeline failed' }; }
       const rawAnswer = r.final?.text || r.final?.answer || null;
       meta = r.final?.meta || null; ok = r.ok; err = r.ok ? null : (r.err || 'pipeline failed');
       answer = rawAnswer ? await narrate(rawAnswer, 'answer') : null;   // narrative style, number-guarded
@@ -532,10 +609,9 @@ function answerFor(query, priority = false) {
 
 // Part 1 "Verstehen": a short spoken confirmation of the understood question (varied lead-in).
 const VERSTEHEN_LEADINS = ['Verstanden — Ihre Frage lautet', 'Alles klar, Sie möchten wissen', 'Gut, Sie fragen', 'Ich habe verstanden — Sie möchten wissen', 'In Ordnung, Ihre Frage ist', 'Notiert — Sie interessiert', 'Gerne — Sie fragen also', 'Habe ich — Sie möchten erfahren', 'Klar, es geht Ihnen um', 'Ich sehe, Sie wollen wissen'];
-let verstehenRot = 0;
-function verstehenText(query) {
+function verstehenText(query, userKey = 'anon') {
   const q = String(query || '').trim();
-  return VERSTEHEN_LEADINS[(verstehenRot++) % VERSTEHEN_LEADINS.length] + ': ' + q;
+  return VERSTEHEN_LEADINS[(rotFor(userKey).verstehen++) % VERSTEHEN_LEADINS.length] + ': ' + q;
 }
 
 // Part 2 "Überbrücken": a short bridge — first turn introduces the service (varied), later turns
@@ -564,8 +640,7 @@ const TOPIC_ACKS = [
   'Gerne, ganz frisch gefragt — ich schaue direkt für Sie nach.',
   'Wechseln wir das Thema — mache ich gern, ich prüfe das eben.',
 ];
-let ackRot = 0;
-function topicAckText() { return TOPIC_ACKS[(ackRot++) % TOPIC_ACKS.length]; }
+function topicAckText(userKey = 'anon') { return TOPIC_ACKS[(rotFor(userKey).ack++) % TOPIC_ACKS.length]; }
 
 // #1: a short spoken greeting played on the caller's FIRST interaction (browsers block autoplay on
 // bare load, so it fires on the first gesture). Kept distinct from the turn-0 service intro (which
@@ -577,8 +652,7 @@ const GREETINGS = [
   'Willkommen. Ich bin bereit — nennen Sie mir einfach einen Ort und eine Kennzahl.',
   'Schön, dass Sie da sind. Fragen Sie mich gern etwas zu den Regionaldaten in Deutschland.',
 ];
-let greetRot = 0;
-function greetingText() { return GREETINGS[(greetRot++) % GREETINGS.length]; }
+function greetingText(userKey = 'anon') { return GREETINGS[(rotFor(userKey).greet++) % GREETINGS.length]; }
 // Warm all greeting variants once at startup so /greeting serves an instant cached clip instead of
 // paying the ~7s cold channel-setup on each caller's first interaction. chanLimit=1 serialises these,
 // so they never contend with a live answer; best-effort, cache-misses fall back to on-demand.
@@ -586,7 +660,7 @@ async function prewarmGreetings() {
   let fail = 0;
   for (const g of GREETINGS) {
     if (greetingCache.has(g)) continue;   // idempotent: don't re-warm what's already cached (retry-safe)
-    try { const au = await ttsSpeak(stripPronunciation(g), 'primary', false); if (au && au.startsWith('/tts/')) greetingCache.set(g, au); else fail++; } catch { fail++; }
+    try { const au = await ttsSpeak(stripPronunciation(g), 'primary', false, false, 'system'); if (au && au.startsWith('/tts/')) greetingCache.set(g, au); else fail++; } catch { fail++; }
   }
   return fail;
 }
@@ -610,7 +684,7 @@ async function prewarmBridge() {
   let fail = 0;
   for (const t of BRIDGE_FACTS) {
     if (bridgeF1.some((c) => c.text === t)) continue;   // idempotent: don't duplicate an already-warmed clip (retry-safe)
-    try { const au = await ttsSpeak(stripPronunciation(t), 'primary', false); if (au && au.startsWith('/tts/')) bridgeF1.push({ text: t, audioUrl: au }); else fail++; } catch { fail++; }
+    try { const au = await ttsSpeak(stripPronunciation(t), 'primary', false, false, 'system'); if (au && au.startsWith('/tts/')) bridgeF1.push({ text: t, audioUrl: au }); else fail++; } catch { fail++; }
   }
   return fail;
 }
@@ -623,7 +697,7 @@ async function produceNextN1(place) {
     const ff = await wikiFunFact(place);
     if (ff && ff.text) {
       const ftext = stripPronunciation(await narrate(ff.text, 'funfact'));
-      const au = await ttsSpeak(ftext, 'primary', false);
+      const au = await ttsSpeak(ftext, 'primary', false, false, 'system');
       if (au && au.startsWith('/tts/')) { bridgeN1Queue.push({ ...ff, text: ftext, audioUrl: au }); while (bridgeN1Queue.length > 4) bridgeN1Queue.shift(); }
     }
   } catch {}
@@ -653,7 +727,7 @@ async function prewarmGap() {
   let fail = 0;
   for (const t of GAP_TEXTS) {
     if (gapPool.some((c) => c.text === t)) continue;   // idempotent: don't duplicate an already-warmed clip (retry-safe)
-    try { const au = await ttsSpeak(stripPronunciation(t), 'primary', false); if (au && au.startsWith('/tts/')) gapPool.push({ text: t, audioUrl: au }); else fail++; } catch { fail++; }
+    try { const au = await ttsSpeak(stripPronunciation(t), 'primary', false, false, 'system'); if (au && au.startsWith('/tts/')) gapPool.push({ text: t, audioUrl: au }); else fail++; } catch { fail++; }
   }
   return fail;
 }
@@ -676,8 +750,7 @@ async function prewarmLoop() {
   }
 }
 function pickGap() { return gapPool.length ? gapPool[gapRot++ % gapPool.length] : null; }
-let introRot = 0;
-async function introBridge(context) {
+async function introBridge(context, userKey = 'anon') {
   // Invariant I3: the bridge identity is decided by turnCount (how many turns were already
   // delivered this session), NOT by whether the last answer succeeded. turnCount 0 -> introduce
   // the service; every later turn -> a context bridge that references the previous interaction to
@@ -695,10 +768,10 @@ async function introBridge(context) {
     } else {
       // later turn but no carried content (e.g. the previous answer failed) -> a neutral bridge,
       // still NOT the service intro. Keeps I5 intact.
-      text = BRIDGE_FALLBACKS[(introRot++) % BRIDGE_FALLBACKS.length];
+      text = BRIDGE_FALLBACKS[(rotFor(userKey).intro++) % BRIDGE_FALLBACKS.length];
     }
   } else {
-    text = SERVICE_INTROS[(introRot++) % SERVICE_INTROS.length];
+    text = SERVICE_INTROS[(rotFor(userKey).intro++) % SERVICE_INTROS.length];
   }
   return stripPronunciation(text);
 }
@@ -892,10 +965,10 @@ async function followup(query, answer) {
 // keep ONLY the suggestions the pipeline can actually answer with real data.
 // No raw fallback -- an unvalidated (possibly unanswerable) suggestion must never be shown.
 // Whatever validates within the budget is returned; the rest are dropped (caller has a guaranteed set to fall back on).
-async function validateSuggestions(suggestions, want = 3, timeoutMs = 20000) {
+async function validateSuggestions(suggestions, want = 3, timeoutMs = 20000, userKey = 'anon') {
   if (!suggestions.length) return [];
   const good = [];
-  const checks = suggestions.map((s) => answerFor(s)
+  const checks = suggestions.map((s) => answerFor(s, false, userKey)
     .then((r) => { if (r && r.ok && r.meta && r.meta.has_real_data !== false && r.meta.table) good.push(s); })
     .catch(() => {}));
   const timeout = new Promise((res) => setTimeout(res, timeoutMs));
@@ -906,6 +979,7 @@ async function validateSuggestions(suggestions, want = 3, timeoutMs = 20000) {
 async function readBody(req) { let b = ''; for await (const c of req) b += c; try { return JSON.parse(b); } catch { return {}; } }
 const jsonRes = (res, code, obj) => { res.writeHead(code, { 'content-type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(obj)); };
 
+let shuttingDown = false;   // flips /ready to 503 the instant a shutdown signal arrives; see gracefulShutdown()
 const server = createServer(async (req, res) => {
   if (req.method === 'GET' && (req.url === '/' || req.url === '/index.html')) {
     try { const html = (await readFile(join(__dir, 'index.html'), 'utf8')).replace('</head>', `<script>window.CC_STT_LIVE=${process.env.CC_STT_LIVE === '1'};</script></head>`); res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store, must-revalidate' }); res.end(html); }
@@ -913,6 +987,7 @@ const server = createServer(async (req, res) => {
     return;
   }
   if (req.method === 'POST' && req.url === '/understand') {
+    const userKey = userKeyFor(req);
     const b = await readBody(req);
     const query = (b.query || '').toString().slice(0, 300);
     if (!query.trim()) return jsonRes(res, 400, { error: 'empty query' });
@@ -920,12 +995,12 @@ const server = createServer(async (req, res) => {
     // the spoken verstehen/funfact/bridge) so its ~10s catalog-match+phrasing-LLM latency runs UNDER the
     // preamble instead of after it. answerFor dedupes by key, so the best_guess warm below is a cache hit
     // whenever understand didn't rewrite the query (the common case); a rewrite just warms both.
-    answerFor(query);                              // t=0 speculation: max lead time for the Atlas query (operator: "sofort parallel absenden")
+    answerFor(query, false, userKey);              // t=0 speculation: max lead time for the Atlas query (operator: "sofort parallel absenden")
     const u = await understand(query, b.context);
     trace('understand', { query, precise: u.precise, kind: u.kind, clarify: (u.clarify || '').slice(0, 70), best_guess: u.best_guess, slots: u.slots });
-    answerFor(u.best_guess);                       // also warm the resolved query (cache hit when === raw)
+    answerFor(u.best_guess, false, userKey);       // also warm the resolved query (cache hit when === raw)
     let clarifyAudioUrl = null;
-    if (!u.precise && u.clarify) { try { clarifyAudioUrl = proxied(await ttsSpeak(u.clarify, 'primary')); } catch {} }
+    if (!u.precise && u.clarify) { try { clarifyAudioUrl = proxied(await ttsSpeak(u.clarify, 'primary', true, false, userKey)); } catch {} }
     return jsonRes(res, 200, { ...u, clarifyAudioUrl });
   }
   if (req.method === 'POST' && req.url === '/stt') {
@@ -938,6 +1013,7 @@ const server = createServer(async (req, res) => {
   if (req.method === 'POST' && req.url === '/context') {
     // fast, pre-answer parts (no ArcGIS pipeline): part 1 "Verstehen" (confirm the question) + part 3
     // "Wussten Sie schon" (a VARIED, fresh Wikipedia fact). Filled into the ordered speech queue on the client.
+    const userKey = userKeyFor(req);
     const b = await readBody(req);
     const q = (b.query || '').toString().slice(0, 300);
     const place = placeFromQuery(q) || q;
@@ -948,14 +1024,14 @@ const server = createServer(async (req, res) => {
     const gap = pickGap();
     const pre = pickBridge();
     if (gap) { vtext = gap.text; vau = gap.audioUrl; }
-    else { vtext = stripPronunciation(verstehenText(q)); await ttsSpeak(vtext, 'primary').then((u) => { vau = u; }, () => {}); }
+    else { vtext = stripPronunciation(verstehenText(q, userKey)); await ttsSpeak(vtext, 'primary', true, false, userKey).then((u) => { vau = u; }, () => {}); }
     if (pre) {
       funfact = { ...pre, audioUrl: proxied(pre.audioUrl) };
     } else {
       const ff = await wikiFunFact(place);
       if (ff && ff.text) {
         const ftext = stripPronunciation(await narrate(ff.text, 'funfact'));
-        let fau = null; await ttsSpeak(ftext, 'primary').then((u) => { fau = u; }, () => {});
+        let fau = null; await ttsSpeak(ftext, 'primary', true, false, userKey).then((u) => { fau = u; }, () => {});
         funfact = { ...ff, text: ftext, audioUrl: proxied(fau) };
       }
     }
@@ -963,53 +1039,60 @@ const server = createServer(async (req, res) => {
   }
   if (req.method === 'POST' && req.url === '/intro') {
     // part 2 "Überbrücken" — prepared in advance by the client (first turn: service intro; later: bridge)
+    const userKey = userKeyFor(req);
     const b = await readBody(req);
-    const text = await introBridge(b.context || {});
-    let au = null; try { au = await ttsSpeak(text, 'primary', false); } catch {}   // prefetch (next-turn bridge / topic-ack / greeting) -> low priority, must not slow the current answer's TTS
+    const text = await introBridge(b.context || {}, userKey);
+    let au = null; try { au = await ttsSpeak(text, 'primary', false, false, userKey); } catch {}   // prefetch (next-turn bridge / topic-ack / greeting) -> low priority, must not slow the current answer's TTS
     return jsonRes(res, 200, { text, audioUrl: proxied(au) });
   }
   if (req.method === 'POST' && req.url === '/topicack') {
     // a "that's also an interesting question" opener, pre-synthesized so it can play the instant the
     // caller asks a NEW topic instead of the offered follow-up (client decides when to use it).
-    const text = stripPronunciation(topicAckText());
-    let au = null; try { au = await ttsSpeak(text, 'primary', false); } catch {}   // prefetch (next-turn bridge / topic-ack / greeting) -> low priority, must not slow the current answer's TTS
+    const userKey = userKeyFor(req);
+    const text = stripPronunciation(topicAckText(userKey));
+    let au = null; try { au = await ttsSpeak(text, 'primary', false, false, userKey); } catch {}   // prefetch (next-turn bridge / topic-ack / greeting) -> low priority, must not slow the current answer's TTS
     return jsonRes(res, 200, { text, audioUrl: proxied(au) });
   }
   if (req.method === 'POST' && req.url === '/greeting') {
     // #1: a short welcome, played on the caller's first interaction. Served from the startup prewarm
     // cache (instant) so the "logo -> first ton" doesn't pay the ~7s cold channel-setup per caller;
     // falls back to on-demand synthesis only while the boot warm hasn't finished yet.
-    const g = greetingText();                 // raw greeting (rotates) = cache key
+    const userKey = userKeyFor(req);
+    const g = greetingText(userKey);           // raw greeting (rotates per caller) = cache key
     const text = stripPronunciation(g);
     const cached = greetingCache.get(g);
     if (cached) return jsonRes(res, 200, { text, audioUrl: proxied(cached) });
-    let au = null; try { au = await ttsSpeak(text, 'primary', false); } catch {}
+    let au = null; try { au = await ttsSpeak(text, 'primary', false, false, userKey); } catch {}
     return jsonRes(res, 200, { text, audioUrl: proxied(au) });
   }
   if (req.method === 'POST' && (req.url === '/answer' || req.url === '/ask')) {
+    const userKey = userKeyFor(req);
     const query = ((await readBody(req)).query || '').toString().slice(0, 300);
     if (!query.trim()) return jsonRes(res, 400, { error: 'empty query' });
-    const r = await answerFor(query, true);   // user-facing -> priority over any background speculation
+    const r = await answerFor(query, true, userKey);   // user-facing -> priority over any background speculation
     // Synthesize the atlas-answer audio ON-DEMAND, only for this one real delivered answer (speculation
     // warmed DATA only). The real answer's TTS thus gets the channel to itself instead of queueing
     // behind 3-9 throwaway speculative synths.
     let audioUrl = null;
-    if (r.ok && r.answer) { try { audioUrl = proxied(await ttsSpeak(r.answer, 'primary', true)); } catch {} }
+    if (r.ok && r.answer) { try { audioUrl = proxied(await ttsSpeak(r.answer, 'primary', true, false, userKey)); } catch {} }
     trace('answer', { query, ok: r.ok, table: r.meta && r.meta.table, has_real_data: r.meta && r.meta.has_real_data, rows: r.meta && r.meta.live_rows_used, reused: r.reused, err: r.err });
     produceNextN1(r.meta && (r.meta.place_resolved || r.meta.place_name_requested));   // K1: content-linked "wussten Sie schon" for the NEXT round's instant N1 bridge (background)
     // warm follow-up candidates in the background so /followup can validate them from cache (some cities have no data)
     if (r.ok && r.meta && r.meta.table && r.meta.has_real_data !== false) {
       const place = placeFromQuery(query) || r.meta.place_name_requested || r.meta.place_resolved || '';
-      swapCityFollowups(query, place, 3).forEach((s) => { answerFor(s, false); });   // fire-and-forget DATA speculation (no TTS)
+      swapCityFollowups(query, place, 3).forEach((s) => { answerFor(s, false, userKey); });   // fire-and-forget DATA speculation (no TTS)
     }
-    return jsonRes(res, r.ok ? 200 : 502, { query, ...r, audioUrl });
+    // QUEUE_FULL is "try again shortly", not a genuine pipeline failure -> distinct 503 so a client/LB can retry.
+    const status = r.ok ? 200 : (r.err === 'QUEUE_FULL' ? 503 : 502);
+    return jsonRes(res, status, { query, ...r, audioUrl });
   }
   if (req.method === 'POST' && req.url === '/followup') {
+    const userKey = userKeyFor(req);
     const b = await readBody(req);
     const query = (b.query || '').toString().slice(0, 300);
     if (!query.trim()) return jsonRes(res, 400, { error: 'empty query' });
     const f = await followup(query, (b.answer || '').toString().slice(0, 600));
-    const cur = await answerFor(query);   // cached from the answer just delivered
+    const cur = await answerFor(query, false, userKey);   // cached from the answer just delivered
     const curHasData = !!(cur && cur.ok && cur.meta && cur.meta.table && cur.meta.has_real_data !== false);
     const place = placeFromQuery(query) || (cur && cur.meta && (cur.meta.place_name_requested || cur.meta.place_resolved)) || '';
     // Candidates: same-question place swaps (warmed during /answer) + LLM variety. NONE is trusted blindly --
@@ -1018,13 +1101,13 @@ const server = createServer(async (req, res) => {
     const seen = new Set([query]); const candidates = [];
     for (const s of [...swaps, ...f.suggestions]) { if (s && !seen.has(s)) { seen.add(s); candidates.push(s); } }
     candidates.splice(4);   // cap the background burst: warming 9+ live city-pipelines starved the real answer (chanLimit=1 TTS + litellm-over-tunnel contention). 4 is plenty to yield 3 validated.
-    candidates.forEach((s) => answerFor(s));   // warm (swaps are mostly cache hits from /answer already)
-    const validated = await validateSuggestions(candidates, 3, 8000);   // ONLY answerable ones survive; short deadline so /followup doesn't hog LLM+TTS from the next real answer
+    candidates.forEach((s) => answerFor(s, false, userKey));   // warm (swaps are mostly cache hits from /answer already)
+    const validated = await validateSuggestions(candidates, 3, 8000, userKey);   // ONLY answerable ones survive; short deadline so /followup doesn't hog LLM+TTS from the next real answer
     // spoken invite must also be answerable -> derive it from a validated suggestion (fall back to a safe generic)
-    const inviteText = validated.length ? deriveInvite(validated[0])
+    const inviteText = validated.length ? deriveInvite(validated[0], userKey)
       : 'Möchten Sie noch etwas aus dem Deutschlandatlas wissen?';
     let inviteAudioUrl = null;
-    try { inviteAudioUrl = proxied(await ttsSpeak(inviteText, 'primary', false)); } catch {}   // P5 follow-up plays last -> low priority, never ahead of the answer's TTS
+    try { inviteAudioUrl = proxied(await ttsSpeak(inviteText, 'primary', false, false, userKey)); } catch {}   // P5 follow-up plays last -> low priority, never ahead of the answer's TTS
     return jsonRes(res, 200, { invite: inviteText, suggestions: validated, inviteAudioUrl });
   }
   if (req.method === 'GET' && /^\/fillers\/filler[1-9]\.wav$/.test(req.url)) {
@@ -1094,6 +1177,25 @@ const server = createServer(async (req, res) => {
     res.end(pretty || '(no trace yet — make a request first)');
     return;
   }
+  if (req.method === 'GET' && req.url === '/health') {
+    // liveness only (always 200 while the process is up) -- for readiness (safe to route NEW traffic
+    // to) see /ready below.
+    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+    res.end(JSON.stringify({ status: 'ok', uptime_s: Math.round(process.uptime()), pid: process.pid }));
+    return;
+  }
+  if (req.method === 'GET' && req.url === '/ready') {
+    // For a load balancer in front of multiple instances: 503 while draining (SIGTERM received, see
+    // gracefulShutdown below) so it stops sending new callers before the process actually exits, and
+    // 503 while a limiter's queue is already at cap (a NEW request would just QUEUE_FULL-reject anyway
+    // -- better to tell the LB to try a different instance / have the caller retry shortly).
+    const limiters = { pipeline: pipeLimit.stats(), piper: piperLimit.stats(), channel: chanLimit.stats() };
+    const saturated = Object.values(limiters).some((s) => s.hiQueued >= s.hiQueueMax || s.loQueued >= s.loQueueMax);
+    const ready = !shuttingDown && !saturated;
+    res.writeHead(ready ? 200 : 503, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+    res.end(JSON.stringify({ ready, shutting_down: shuttingDown, limiters }));
+    return;
+  }
   if (req.method === 'GET' && req.url.startsWith('/fsm')) {
     // read-only view of the canonical dialog state machine (design single source of truth)
     res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
@@ -1112,3 +1214,24 @@ ensureFillers().catch(() => {});   // self-contained wait-clips (no-op if alread
 // serving everyone else instead of letting Node's default uncaught-exception behavior exit.
 process.on('uncaughtException', (err) => console.error('uncaughtException (server kept running):', err));
 process.on('unhandledRejection', (err) => console.error('unhandledRejection (server kept running):', err));
+
+// Graceful drain for redeploys/orchestrated restarts. Order matters: flip /ready to 503 FIRST and only
+// close the listening socket after a short grace period -- calling server.close() immediately was
+// tried and measured to refuse the connection outright (curl saw a bare connection-reset, not a 503),
+// which defeats the point: a load balancer needs to actually SEE /ready go 503 before new connections
+// stop arriving at all, or it has no chance to redirect traffic first. After the grace period, stop
+// accepting NEW connections and let in-flight requests -- a caller mid-turn, a spawned Piper/pipeline
+// child -- finish normally instead of being cut off mid-answer. A backstop timeout forces exit if
+// something stays wedged (e.g. a hung child process) so a bad shutdown can't block a redeploy forever.
+function gracefulShutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;   // /ready is 503 from this instant, before the socket itself ever closes
+  const drainDelayMs = Number(process.env.CC_DRAIN_DELAY_MS) || 3000;
+  console.log(`${signal} received — /ready now 503; closing the listener in ${drainDelayMs}ms…`);
+  setTimeout(() => { server.close(() => { console.log('drained, exiting'); process.exit(0); }); }, drainDelayMs);
+  const t = setTimeout(() => { console.error('graceful shutdown timed out — forcing exit'); process.exit(1); },
+    drainDelayMs + (Number(process.env.CC_SHUTDOWN_TIMEOUT_MS) || 15000));
+  if (t.unref) t.unref();
+}
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));

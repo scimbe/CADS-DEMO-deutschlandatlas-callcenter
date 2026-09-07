@@ -42,6 +42,8 @@ Then front `:8791` with your tunnel / the `callcenter-<hash>.bunsenbrenner.org` 
 
 ## Live-verify (not just container-up)
 
+- `GET /health` returns 200 (liveness). `GET /ready` returns 200 when not draining/overloaded — point
+  a load balancer's health check here, not at `/health`, so it stops routing during a SIGTERM drain.
 - `GET /` returns the GUI (200).
 - `POST /answer {"query":"Wie hoch ist die Arbeitslosenquote in Kiel?"}` returns grounded
   `answer` + `meta.table` + an `audioUrl` of the form `/tts/<id>.wav` (proves LLM pipeline + local Piper).
