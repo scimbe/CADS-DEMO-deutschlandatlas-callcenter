@@ -571,6 +571,31 @@ function diskGet(q) {
 }
 function diskPut(q, obj) { try { mkdirSync(Q_CACHE, { recursive: true }); writeFileSync(join(Q_CACHE, qKey(q) + '.json'), JSON.stringify({ ...obj, ts: Date.now() })); } catch {} }
 
+// A pool of EXACT query strings that have actually returned real, grounded data at least once this
+// process lifetime. Real incident (2026-09): a live caller's failed query ("Bevölkerungsdichte" is not
+// an indicator in this dataset at all) still produced a follow-up SUGGESTION for the same indicator in
+// another city -- the FOLLOWUP LLM improvised a plausible-sounding continuation from the failure text,
+// and the "live re-run" validation that's supposed to catch this is NOT reliable: the catalog-match LLM
+// step is itself non-deterministic (documented in README) and can occasionally hallucinate a match for
+// text that names no real indicator. A query that once actually resolved to real data, on the other
+// hand, replays from the disk cache (diskGet, above) on any repeat -- it never needs the flaky
+// catalog-match step to run again -- so it is a genuinely safe ("auf jeden Fall geprüft") source of
+// follow-up suggestions, unlike anything freshly invented by an LLM. Capped + FIFO-pruned.
+const VERIFIED_POOL_MAX = 200;
+const verifiedQueryPool = [];
+function rememberVerified(query) {
+  const idx = verifiedQueryPool.indexOf(query);
+  if (idx !== -1) verifiedQueryPool.splice(idx, 1);   // move to the end (most-recently-verified)
+  verifiedQueryPool.push(query);
+  while (verifiedQueryPool.length > VERIFIED_POOL_MAX) verifiedQueryPool.shift();
+}
+// n random, distinct entries from the verified pool, excluding `exclude`.
+function poolSuggestions(exclude, n) {
+  const pool = verifiedQueryPool.filter((q) => q !== exclude);
+  for (let i = pool.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [pool[i], pool[j]] = [pool[j], pool[i]]; }
+  return pool.slice(0, n);
+}
+
 function answerFor(query, priority = false, userKey = 'anon') {
   const key = (query || '').trim();
   if (!key) return Promise.resolve({ ok: false, answer: null, meta: null, audioUrl: null, err: 'empty' });
@@ -580,6 +605,7 @@ function answerFor(query, priority = false, userKey = 'anon') {
     const cached = diskGet(key);
     if (cached && cached.answer && cached.meta) {           // reuse: same request ran before, data unchanged within TTL
       answer = cached.answer; meta = cached.meta; ok = true; reused = true;
+      rememberVerified(key);   // a disk-cache hit is just as "verified" as a fresh success
     } else {
       let r;
       // pipeLimit can now reject with QUEUE_FULL under multi-user load (see makeLimiter) -- turn that
@@ -590,7 +616,7 @@ function answerFor(query, priority = false, userKey = 'anon') {
       const rawAnswer = r.final?.text || r.final?.answer || null;
       meta = r.final?.meta || null; ok = r.ok; err = r.ok ? null : (r.err || 'pipeline failed');
       answer = rawAnswer ? await narrate(rawAnswer, 'answer') : null;   // narrative style, number-guarded
-      if (ok && answer && meta && meta.table && meta.has_real_data !== false) diskPut(key, { answer, meta });
+      if (ok && answer && meta && meta.table && meta.has_real_data !== false) { diskPut(key, { answer, meta }); rememberVerified(key); }
     }
     // NO TTS here: answerFor warms DATA only. Audio is synthesized ON-DEMAND by the delivering route
     // (/answer) for the ONE real answer. Speculation fires swapCityFollowups -> 3-9 answerFor calls per
@@ -1106,17 +1132,31 @@ const server = createServer(async (req, res) => {
     const b = await readBody(req);
     const query = (b.query || '').toString().slice(0, 300);
     if (!query.trim()) return jsonRes(res, 400, { error: 'empty query' });
-    const f = await followup(query, (b.answer || '').toString().slice(0, 600));
     const cur = await answerFor(query, false, userKey);   // cached from the answer just delivered
     const curHasData = !!(cur && cur.ok && cur.meta && cur.meta.table && cur.meta.has_real_data !== false);
     const place = placeFromQuery(query) || (cur && cur.meta && (cur.meta.place_name_requested || cur.meta.place_resolved)) || '';
-    // Candidates: same-question place swaps (warmed during /answer) + LLM variety. NONE is trusted blindly --
-    // the pipeline genuinely has no data for some cities, so every candidate is validated against a live run.
+    // Real incident (2026-09): when the current turn FAILED (no real data -- e.g. the caller asked about
+    // an indicator this dataset simply doesn't have, like "Bevölkerungsdichte"), the follow-up LLM still
+    // improvised a continuation off the failure text -- "the same indicator, another city" (its own
+    // pattern A) -- and the live-pipeline "validation" below did NOT reliably catch it, because the
+    // catalog-match LLM step it depends on is itself non-deterministic (documented in the README) and
+    // can occasionally hallucinate a match for text naming no real indicator. So: don't ask the LLM to
+    // improvise off a failure at all. Suggestions after a failure come ONLY from the verified pool
+    // (exact queries proven to return real data before -- see rememberVerified()).
+    const f = curHasData ? await followup(query, (cur.answer || '').toString().slice(0, 600)) : { invite: '', suggestions: [] };
+    // Candidates: same-question place swaps (safe by construction: identical table, just the city text
+    // changes) + LLM variety (only on success) + verified-pool entries topping up when short (covers the
+    // failure case entirely, and is a guaranteed-safe backstop otherwise). NONE is trusted blindly here
+    // either -- every candidate still runs the live pipeline once more below; pool entries just replay
+    // from the disk cache there (diskGet) instead of re-running the flaky catalog-match step.
     const swaps = curHasData ? swapCityFollowups(query, place, 3) : [];
     const seen = new Set([query]); const candidates = [];
     for (const s of [...swaps, ...f.suggestions]) { if (s && !seen.has(s)) { seen.add(s); candidates.push(s); } }
-    candidates.splice(4);   // cap the background burst: warming 9+ live city-pipelines starved the real answer (chanLimit=1 TTS + litellm-over-tunnel contention). 4 is plenty to yield 3 validated.
-    candidates.forEach((s) => answerFor(s, false, userKey));   // warm (swaps are mostly cache hits from /answer already)
+    if (candidates.length < 3) {
+      for (const s of poolSuggestions(query, 5 - candidates.length)) { if (s && !seen.has(s)) { seen.add(s); candidates.push(s); } }
+    }
+    candidates.splice(6);   // cap the background burst: warming 9+ live city-pipelines starved the real answer (chanLimit=1 TTS + litellm-over-tunnel contention); pool entries are cheap cache hits so they don't count against this the same way, but keep an overall cap regardless.
+    candidates.forEach((s) => answerFor(s, false, userKey));   // warm (swaps + pool entries are mostly cache hits already)
     const validated = await validateSuggestions(candidates, 3, 8000, userKey);   // ONLY answerable ones survive; short deadline so /followup doesn't hog LLM+TTS from the next real answer
     // spoken invite must also be answerable -> derive it from a validated suggestion (fall back to a safe generic)
     const inviteText = validated.length ? deriveInvite(validated[0], userKey)

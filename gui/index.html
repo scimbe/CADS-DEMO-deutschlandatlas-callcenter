@@ -285,7 +285,20 @@
   // and the next slot is filled, so order holds and nothing is interrupted (even when the real
   // answer arrives during an earlier clip).
   let seq=[], seqBusy=false;
-  function newTurn(){ seq=[]; seqBusy=false; speaking=false; stopFillerLoop(); try{player.pause();player.currentTime=0;player.onended=null;player.oncanplaythrough=null;}catch(e){} }
+  // FSM invariant I1 ("ordered/non-interruptible: P1..P5 always play to the end") was being violated
+  // here: submitting a new question (or clicking a follow-up bubble) called newTurn() immediately, which
+  // hard-stopped the player mid-clip even while the PREVIOUS turn's audio (e.g. its P5 follow-up invite)
+  // was still speaking -- reported live as a statement getting abruptly cut off. Fix: only hard-reset the
+  // player when nothing is actually playing right now; if a clip is genuinely mid-playback, just swap in
+  // the fresh (empty) `seq` and let the CURRENT clip finish naturally -- its own onended handler (`advance`,
+  // set by pump()) already does `seqBusy=false; setTimeout(pump,0)`, and that pump() call will pick up
+  // this new seq once it fires, so the new turn's first clip starts right after, not instead of, the old one.
+  function newTurn(){
+    seq=[];
+    if(seqBusy && !player.paused && !player.ended) return;   // let it finish speaking (I1) -- deferred, not skipped
+    seqBusy=false; speaking=false; stopFillerLoop();
+    try{player.pause();player.currentTime=0;player.onended=null;player.oncanplaythrough=null;}catch(e){}
+  }
   function slot(){ const it={ready:false,url:null,played:false}; seq.push(it); return it; }
   // Unlock audio within the user gesture (a click): browsers block a later play() once the
   // click's transient activation has expired -- and our first real clip only plays after /context
