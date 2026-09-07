@@ -704,6 +704,10 @@ async function produceNextN1(place) {
 }
 // Pick the pre-produced bridge to speak while the answer computes: prefer the content-linked N1 from a
 // prior round, else a generic F1 clip; null means the pool is not warm yet -> caller synthesizes live.
+// NOT called from /context's funfact slot as of 2026-09 (see that route's comment) -- the F1 fallback
+// broke the "always a real fact" invariant and caused a "fetching data" phrase to repeat right after
+// the GAP clip. Kept defined + still prewarmed (prewarmLoop) in case bridgeF1 gets wired elsewhere,
+// e.g. as a P1 BRIDGE (/intro) variant.
 function pickBridge() {
   if (bridgeN1Queue.length) return bridgeN1Queue.shift();
   if (bridgeF1.length) return bridgeF1[bridgeRot++ % bridgeF1.length];
@@ -1019,10 +1023,21 @@ const server = createServer(async (req, res) => {
     const place = placeFromQuery(q) || q;
     let vtext, vau = null, funfact = null;
     // Both preamble slots are now PRE-PRODUCED so /context carries NO live channel TTS (operator spec):
-    // verstehen -> a "looking it up" GAP clip; funfact -> the F1/N1 bridge. This takes /context out of the
-    // chanLimit=1 contention entirely. Live synthesis only if a pool isn't warm yet (startup window).
+    // verstehen -> a "looking it up" GAP clip; funfact -> the N1 bridge (a REAL, place-linked Wikipedia
+    // fact produced right after the previous answer -- see produceNextN1). This takes /context out of
+    // the chanLimit=1 contention entirely. Live synthesis only if a pool isn't warm yet (startup window).
+    //
+    // bridgeF1 is deliberately NOT used here (was until 2026-09): it holds GENERIC "I'm looking up your
+    // data" bridging text, not a fact, and FSM invariant I4 requires "Wussten Sie schon" to always be a
+    // real, Wikipedia-sourced fact. Falling back to F1 broke that invariant on almost every turn (N1 is
+    // rarely stocked with 2+ items, so pickBridge()'s F1 fallback dominated in practice) AND produced a
+    // "loop" symptom live callers reported: GAP ("Ich schaue die Zahlen nach...") immediately followed
+    // by an F1 clip saying essentially the same thing ("Ich frage Ihre Werte live ab...") instead of an
+    // actual fact -- two near-identical "fetching data" phrases back to back, never a real "Wussten Sie
+    // schon". bridgeF1/prewarmBridge/pickBridge are left in place (unused here) in case they get wired
+    // into a different slot (e.g. the P1 BRIDGE /intro text) later.
     const gap = pickGap();
-    const pre = pickBridge();
+    const pre = bridgeN1Queue.length ? bridgeN1Queue.shift() : null;
     if (gap) { vtext = gap.text; vau = gap.audioUrl; }
     else { vtext = stripPronunciation(verstehenText(q, userKey)); await ttsSpeak(vtext, 'primary', true, false, userKey).then((u) => { vau = u; }, () => {}); }
     if (pre) {
