@@ -537,15 +537,26 @@ async function wikiFunFact(place) {
     const title = sj.title || place;
     const url = sj.content_urls?.desktop?.page || ('https://de.wikipedia.org/wiki/' + encodeURIComponent(place));
     // fuller plain-text extract (all sections) for VARIETY — not just the always-identical lead
+    //
+    // Sentence split: plain "split on . followed by space" chops German ordinal-date abbreviations
+    // mid-fact -- e.g. Kiel's real extract "Mit 251.842 Einwohnern (31. Dezember 2025) ist sie..."
+    // used to split into "...Einwohnern (31." + "Dezember 2025) ist sie...", and the SECOND (garbled,
+    // parenthesis-orphaned) half then got picked and spoken as the "fact" -- a real, reported "badly
+    // prepared Wussten-Sie-schon" incident. Fix: don't split right after a period/!/? that is itself
+    // preceded by a digit (blocks "31.", "13.", single/double-digit ordinals), and only split when the
+    // next sentence actually starts with a capital letter or quote (blocks splitting mid-abbreviation
+    // in general). Not perfect (a sentence genuinely ending in a bare digit, e.g. "...im Jahr 1900.",
+    // now merges into the next one instead of splitting) but that failure mode is a harmless run-on,
+    // not a garbled fragment -- a much safer default.
     let sentences = [];
     try {
       const fres = await fetch('https://de.wikipedia.org/w/api.php?action=query&prop=extracts&explaintext=1&exsectionformat=plain&redirects=1&format=json&titles=' + encodeURIComponent(title), { headers: WIKI_UA });
       const fj = await fres.json();
       const full = Object.values(fj?.query?.pages || {})[0]?.extract || sj.extract;
-      sentences = full.split(/(?<=[.!?])\s+/).map((s) => s.trim())
+      sentences = full.split(/(?<!\d[.!?])(?<=[.!?])\s+(?=[A-ZÄÖÜ"„])/).map((s) => s.trim())
         .filter((s) => s.length >= 40 && s.length <= 240 && /[a-zäöü]/i.test(s) && !s.includes('=='));
     } catch { /* fall back to the summary below */ }
-    if (!sentences.length) sentences = sj.extract.split(/(?<=[.!?])\s+/).map((s) => s.trim()).filter((s) => s.length >= 25);
+    if (!sentences.length) sentences = sj.extract.split(/(?<!\d[.!?])(?<=[.!?])\s+(?=[A-ZÄÖÜ"„])/).map((s) => s.trim()).filter((s) => s.length >= 25);
     if (!sentences.length) return null;
     const off = factRotation.get(title) || 0; factRotation.set(title, off + 1);
     const idx = off % sentences.length;
@@ -747,6 +758,10 @@ function pickBridge() {
 // onward as the recurring "still looking it up" generic filler once verstehen (n=1) and a funfact
 // attempt (n=2) are done. Pre-produced at startup so it returns instantly and stays out of the
 // chanLimit=1 contention that would otherwise queue it behind the answer + speculation.
+// Deliberately varied in STRUCTURE, not just wording (2026-09: "geringe Streuung" feedback -- eight
+// near-identical "I'm fetching data" variants in a row still reads as repetitive even when none of
+// the exact phrases repeat). Mixes short/long, different openers, and different framing (patience,
+// live-data honesty, progress) so consecutive fillers within one long wait feel less same-y.
 const GAP_TEXTS = [
   'Einen Moment — ich schaue die aktuellen Zahlen im Deutschlandatlas für Sie nach.',
   'Ich frage die passenden Regionaldaten gerade live ab, einen kurzen Augenblick.',
@@ -756,6 +771,12 @@ const GAP_TEXTS = [
   'Ich hole Ihre Zahl gerade aus dem Atlas — gleich bin ich da.',
   'Gerne — ich suche die passenden Daten heraus, gleich habe ich Ihre Antwort.',
   'Einen kleinen Moment, ich prüfe das eben im Deutschlandatlas für Sie.',
+  'Noch einen Augenblick Geduld, es dauert nicht mehr lange.',
+  'Fast geschafft — ich stelle Ihre Antwort gerade zusammen.',
+  'Die Abfrage läuft noch, damit Sie einen wirklich aktuellen Wert bekommen und keine Schätzung.',
+  'Kleiner Moment noch, dann kann ich Ihnen die genaue Zahl nennen.',
+  'Ich bin noch dabei — bei manchen Tabellen dauert die Live-Abfrage etwas länger.',
+  'Danke für Ihre Geduld, gleich ist es soweit.',
 ];
 let gapRot = 0;
 async function prewarmGap() {
