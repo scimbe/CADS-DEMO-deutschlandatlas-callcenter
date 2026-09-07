@@ -235,14 +235,24 @@
   const q=document.getElementById('q'),go=document.getElementById('go'),mic=document.getElementById('mic');
   const aEl=document.getElementById('a'),qEcho=document.getElementById('qEcho'),src=document.getElementById('src'),srcTxt=document.getElementById('srcTxt');
   const player=document.getElementById('player'),replay=document.getElementById('replay'),timerEl=document.getElementById('timer');
-  const EX_POOL=['Wie hoch ist die Straftatenquote in Kiel?','Wie viele Schulabgänger in Kiel haben keinen Hauptschulabschluss?','Wie viele Arbeitslose gibt es in Dresden?','Wie hoch ist die Arbeitslosenquote in Leipzig?','Wie viele Ärzte gibt es je 100.000 Einwohner in München?','Wie hoch ist die Steuereinnahmekraft in Hamburg?','Wie ist die Breitbandversorgung in Rostock?','Wie hoch ist der Ausländeranteil in Frankfurt?','Wie viele Ladepunkte für Elektroautos gibt es in Stuttgart?','Wie hoch ist die Kriminalitätsrate in Dortmund?','Wie hoch ist die Bevölkerungsdichte in Bremen?','Wie viele Straftaten pro 100.000 Einwohner gibt es in Hannover?'];
+  // 2026-09: 4 of the original 12 static examples were verified against catalog.json (and, for the
+  // crime ones, this repo's own README: "No crime-topic indicators exist anywhere in this dataset")
+  // to be GUARANTEED unanswerable -- clicking them always produced a "keine Daten gefunden" refusal,
+  // exactly the hallucinated-suggestion symptom reported live, except this source wasn't the LLM at
+  // all, it was a hardcoded example. Replaced with topics confirmed present in catalog.json.
+  const EX_POOL=['Wie viele Schulabgänger in Kiel haben keinen Hauptschulabschluss?','Wie viele Arbeitslose gibt es in Dresden?','Wie hoch ist die Arbeitslosenquote in Leipzig?','Wie viele Ärzte gibt es je 100.000 Einwohner in München?','Wie hoch ist die Steuereinnahmekraft in Hamburg?','Wie ist die Breitbandversorgung in Rostock?','Wie hoch ist der Ausländeranteil in Frankfurt?','Wie viele Ladepunkte für Elektroautos gibt es in Stuttgart?','Wie hoch ist die Steuereinnahmekraft in Dortmund?','Wie viele Hausärzte gibt es je 100.000 Einwohner in Hannover?','Wie hoch ist der Anteil der Schulabgänger ohne Hauptschulabschluss in Bremen?','Wie ist die Breitbandversorgung in Kiel?'];
   const exWrap=document.getElementById('examples');
   function shuffle(a){a=a.slice();for(let i=a.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[a[i],a[j]]=[a[j],a[i]];}return a;}
   // ONE place for suggestions: the bubble row. Examples, clarify options, and follow-ups all render here.
-  function renderBubbles(items, noteHtml){exWrap.innerHTML='';
+  // naturalness-analysis.md §6: example bubbles (generic starters) and follow-up bubbles (actually
+  // derived from what was just answered) rendered into the identical DOM element with no distinction
+  // -- nothing prevented a stale/generic suggestion from standing in for a contextual one, and it
+  // wasn't even verifiable after the fact. `data-source` makes the origin explicit (example/clarify/
+  // followup) for anyone inspecting the DOM or writing a test against it.
+  function renderBubbles(items, noteHtml, source){exWrap.innerHTML='';
     if(noteHtml){const n=document.createElement('div');n.className='exnote';n.innerHTML=noteHtml;exWrap.appendChild(n);}
-    items.forEach(it=>{const b=document.createElement('button');b.className='ex'+(it.best?' best':'');b.textContent=it.label;b.onclick=it.onClick;exWrap.appendChild(b);});}
-  function renderExamples(){renderBubbles(shuffle(EX_POOL).slice(0,3).map(x=>({label:x,onClick:()=>{q.value=x;ask();}})));}
+    items.forEach(it=>{const b=document.createElement('button');b.className='ex'+(it.best?' best':'');b.textContent=it.label;b.onclick=it.onClick;b.dataset.source=it.source||source||'unknown';exWrap.appendChild(b);});}
+  function renderExamples(){renderBubbles(shuffle(EX_POOL).slice(0,3).map(x=>({label:x,onClick:()=>{q.value=x;ask();}})),null,'example');}
   renderExamples();
 
   // instant spoken filler in THE Thorsten voice (pre-rendered, varied for naturalness) — bridges the compute wait
@@ -452,7 +462,16 @@
   // relies on /filler now marking all filler TTS as LOW priority (see that route) so this buffering
   // never causes a filler to outrank / delay the real answer's own (high-priority) TTS call.
   const FILLER_LOOKAHEAD=2;
+  // naturalness-analysis.md §3: a live run captured the SAME turn's "verstehen" filler spoken TWICE,
+  // 5.4s apart, in two different wordings -- one for the raw typed/pre-reformulation text (a
+  // speculative prefetch fired before /understand resolves, see ask()), one for the LLM-resolved
+  // best_guess text. `activeFillerQuery` marks which query is currently authoritative for filler
+  // content; any filler response for a query that's been superseded by the time it resolves is
+  // dropped silently (never shown/spoken, slot still filled with null so the queue keeps moving)
+  // instead of queued anyway -- regardless of which code path produced the stale fetch.
+  let activeFillerQuery=null;
   async function runFillerLoop(query, preFetched){
+    activeFillerQuery=query;
     const inFlight=[];   // [{s, p}] in playback order
     let n=1;
     function launch(){ const s=slot(); const p=(preFetched&&preFetched[n-1])||fetchFiller(query,n); n++; inFlight.push({s,p}); }
@@ -460,9 +479,10 @@
     while(inFlight.length){
       const {s,p}=inFlight.shift();
       const f=await p;
-      if(f&&f.kind==='funfact'&&f.text) showFunfact(f);
-      fill(s, (f&&f.audioUrl&&speakFillerKind(f.kind))?f.audioUrl:null);
-      if(awaitingAnswer) launch();   // top the buffer back up to LOOKAHEAD -- still only while it's actually needed
+      const stale=activeFillerQuery!==query;
+      if(!stale && f&&f.kind==='funfact'&&f.text) showFunfact(f);
+      fill(s, (!stale && f&&f.audioUrl&&speakFillerKind(f.kind))?f.audioUrl:null);
+      if(!stale && awaitingAnswer) launch();   // top the buffer back up to LOOKAHEAD -- still only while it's actually needed
     }
   }
 
@@ -494,7 +514,7 @@
       if(u.clarifyAudioUrl){ const s=slot(); fill(s,u.clarifyAudioUrl); }
       const items=[]; if(u.best_guess) items.push({label:u.best_guess,best:true,onClick:()=>deliver(u.best_guess,false)});
       (u.options||[]).forEach(o=>{ if(o&&o!==u.best_guess) items.push({label:o,onClick:()=>deliver(o,false)}); });
-      renderBubbles(items,'<span class="spin"></span>Wahrscheinlichste Antwort wird bereits vorbereitet …');
+      renderBubbles(items,'<span class="spin"></span>Wahrscheinlichste Antwort wird bereits vorbereitet …','clarify');
       q.value=''; q.focus();
     }catch(e){awaitingAnswer=false;stopFillerLoop();go.disabled=false;q.disabled=false;stopWait();aEl.className='a';aEl.textContent=tr('connError')+e.message;setState('done');}
   }
@@ -559,7 +579,7 @@
           {label:'✓ Ja',best:true,onClick:()=>deliver(sug[0],true,{continued:true,preFillers:preFillers0})},
           ...sug.slice(1).map(s=>({label:s,onClick:()=>deliver(s,true,{continued:true})}))
         ];
-        renderBubbles(items,'💬 '+(f.invite||tr('inviteFallback')));
+        renderBubbles(items,'💬 '+(f.invite||tr('inviteFallback')),'followup');
         followupActive=true;   // a follow-up is now on offer -> a typed NEW question triggers the topic-ack
       } else { renderExamples(); followupActive=false; }
       return f.inviteAudioUrl||null;

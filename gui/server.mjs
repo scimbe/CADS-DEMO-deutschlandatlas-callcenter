@@ -16,7 +16,7 @@
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
 import { readFile, writeFile, rm } from 'node:fs/promises';
-import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, unlinkSync, statSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, unlinkSync, statSync, renameSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -193,6 +193,18 @@ function stripPronunciation(text) {
     .trim();
 }
 
+// German gender-inclusive double-underscore notation ("Ausländer__innen", "Hausärzte__ärztinnen") and
+// underscore-grouped numbers ("100_000") are written/screen-reader conventions, not something meant to
+// be SPOKEN -- Piper/the channel voice has no defined behavior for a bare "_" (naturalness-analysis.md
+// §1: found live in LLM-generated understand/followup text, handed straight to ttsSpeak() before this
+// fix). Merge the two halves directly (no grammatically-perfect fix exists without real NLU; a merged
+// word beats a jarring "underscore" stumble or dead air).
+function stripGenderNotation(text) {
+  return String(text || '')
+    .replace(/(\p{L})_{1,2}(\p{L})/gu, '$1$2')
+    .replace(/(\d)_(\d)/g, '$1$2');
+}
+
 // Self-contained local TTS via Piper (used on the durable host; no ct-agent channel/grant needed).
 // Writes a WAV under a capped temp dir and returns a same-origin /tts/<id>.wav path.
 const TTS_DIR = join(tmpdir(), 'cc-tts');
@@ -219,6 +231,20 @@ function pruneTtsDir(keep = 100) {
     for (const { f } of files.slice(keep)) { try { unlinkSync(join(TTS_DIR, f)); } catch {} }
   } catch {}
 }
+// Objectively measured (naturalness-analysis.md §4, ffmpeg -af astats on real captured clips): every
+// synthesized clip starts at 0 to -1.7dB peak in its first 80ms -- no attack, no lead-in, the single
+// most measurable acoustic signature of "several separately synthesized clips glued in sequence"
+// rather than one continuous utterance (clip ENDS already decay naturally, that part was fine). A
+// short linear fade-in removes the hard cut with no client/protocol change. Best-effort: on any ffmpeg
+// failure, leave the original file in place rather than lose the clip.
+async function applyFadeIn(path, ms = 50) {
+  const tmp = path + '.fade.wav';
+  try {
+    const r = await run('ffmpeg', ['-y', '-hide_banner', '-loglevel', 'error', '-i', path, '-af', `afade=t=in:d=${(ms / 1000).toFixed(3)}`, tmp]);
+    if (r.code === 0 && existsSync(tmp) && statSync(tmp).size > 0) renameSync(tmp, path);
+    else { try { unlinkSync(tmp); } catch {} }
+  } catch { try { unlinkSync(tmp); } catch {} }
+}
 function ttsLocalPiper(text, priority = true, userKey = 'anon') {
   // gated through piperLimit so at most CC_PIPER_CONCURRENCY Piper procs run at once (else a burst
   // spawns dozens and thrashes a small host). User-facing TTS is high-priority; background work
@@ -240,7 +266,7 @@ function ttsLocalPiper(text, priority = true, userKey = 'anon') {
       const p = spawn(process.env.CC_PIPER_BIN, ['--model', process.env.CC_PIPER_MODEL, '--output_file', wav], { env: process.env });
       p.stdin.on('error', () => {});
       p.stdin.end(text);
-      p.on('close', (code) => { pruneTtsDir(); fin(code === 0 && existsSync(wav) ? '/tts/' + id + '.wav' : null); });
+      p.on('close', async (code) => { if (code === 0 && existsSync(wav)) await applyFadeIn(wav); pruneTtsDir(); fin(code === 0 && existsSync(wav) ? '/tts/' + id + '.wav' : null); });
       p.on('error', () => fin(null));
     } catch { fin(null); }
   }), priority, userKey);
@@ -283,7 +309,9 @@ async function localizeChannelClip(url) {
     if (!buf.length) return url;
     try { mkdirSync(TTS_DIR, { recursive: true }); } catch {}
     const id = 'ch-' + process.pid + '-' + (ttsSeq++);
-    await writeFile(join(TTS_DIR, id + '.wav'), buf);
+    const path = join(TTS_DIR, id + '.wav');
+    await writeFile(path, buf);
+    await applyFadeIn(path);
     pruneTtsDir();
     return '/tts/' + id + '.wav';
   } catch { return url; }
@@ -306,7 +334,7 @@ function streamChannelClip(url) {
 }
 
 function ttsSpeak(text, voice = 'primary', priority = true, forceStream = false, userKey = 'anon') {
-  text = stripPronunciation(text);
+  text = stripGenderNotation(stripPronunciation(text));
   if (process.env.CC_TTS !== '1') return Promise.resolve(null);
   // Production voice = the llm2 agent `audio_generation` channel (operator directive), CHANNEL-FIRST.
   // Local Piper, when configured, is an automatic RUNTIME fallback: if the channel call fails at
@@ -333,6 +361,10 @@ const proxied = (u) => (u ? (u.startsWith('/') ? u : '/audio?u=' + encodeURIComp
 // Wait-time filler clips are *.wav (gitignored) so they never ship in a deploy. When local Piper
 // is available, synthesize them from a phrase list on startup — so the feature is self-contained
 // and never a missing-file dependency (which previously 404'd; the route now degrades gracefully).
+// naturalness-analysis.md §5/§6: this is the LEAST varied pool (was 6 phrases) yet the one that plays
+// during the LONGEST, most noticeable gaps (/understand and /followup round trips aren't covered by
+// /filler's own buffering) -- its low variety is disproportionately audible precisely because of when
+// it's heard. Widened to reduce how often a caller hears the same wait-phrase twice in one session.
 const FILLER_PHRASES = [
   'Einen kleinen Moment bitte, ich sehe für Sie in den Daten nach.',
   'Ich frage gerade die Deutschlandatlas-Datenbank ab.',
@@ -340,6 +372,10 @@ const FILLER_PHRASES = [
   'Ich hole die aktuellen Zahlen für Sie heraus.',
   'Gleich habe ich das Ergebnis für Sie.',
   'Ich prüfe die passende Tabelle im Datensatz.',
+  'Einen Moment noch, ich bin gleich so weit.',
+  'Ich schaue kurz nach passenden Anschlussfragen für Sie.',
+  'Noch ein kurzer Augenblick, dann geht es weiter.',
+  'Ich stelle die Übersicht für Sie zusammen.',
 ];
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -736,7 +772,7 @@ async function produceNextN1(place) {
   try {
     const ff = await wikiFunFact(place);
     if (ff && ff.text) {
-      const ftext = stripPronunciation(await narrate(ff.text, 'funfact'));
+      const ftext = stripPronunciation(await narrate(stripPronunciation(ff.text), 'funfact'));
       const au = await ttsSpeak(ftext, 'primary', false, false, 'system');
       if (au && au.startsWith('/tts/')) { bridgeN1Queue.push({ ...ff, text: ftext, audioUrl: au }); while (bridgeN1Queue.length > 4) bridgeN1Queue.shift(); }
     }
@@ -875,7 +911,13 @@ async function narrate(text, mode) {
   const base = (process.env.LITELLM_BASE_URL || '').replace(/\/$/, '');
   const key = process.env.LITELLM_API_KEY, model = process.env.LITELLM_DEFAULT_MODEL || 'local-devstral-small2';
   const sys = mode === 'funfact'
-    ? 'Formuliere den folgenden Wikipedia-Auszug in einen kurzen, unterhaltsamen, gesprochenen deutschen Sprechtext um (maximal 2 Sätze). Behalte JEDE Zahl, JEDEN Namen und JEDEN Fakt exakt bei; erfinde NICHTS und verfälsche nichts. Nur der Stil wird lockerer und erzählender, der Inhalt bleibt gleich. Antworte NUR mit dem umformulierten Text, ohne Anführungszeichen, ohne Vorrede.'
+    // Register pinned (2026-09, naturalness-analysis.md §2): a live run had the SAME session read a
+    // Kiel fact in a neutral data register right next to a Köln fact phrased as tourism-brochure copy
+    // ("die lebendige Metropole im Herzen von..."). "unterhaltsam/locker" at temperature 0.4 varies
+    // TONE along with wording with no anchor -- explicitly ban that register instead of only
+    // constraining content fidelity, so consecutive facts across different places sound like the same
+    // speaker, not a different writer each time.
+    ? 'Formuliere den folgenden Wikipedia-Auszug in einen kurzen, sachlich-freundlichen, gesprochenen deutschen Sprechtext um (maximal 2 Sätze), im Ton einer knappen Nachrichtenmeldung — NICHT wie Werbetext oder ein Reiseführer (vermeide Formulierungen wie "lebendige Metropole", "im Herzen von", "ein Muss für..."). Behalte JEDE Zahl, JEDEN Namen und JEDEN Fakt exakt bei; erfinde NICHTS und verfälsche nichts. Antworte NUR mit dem umformulierten Text, ohne Anführungszeichen, ohne Vorrede.'
     : 'Formuliere die folgende Datenauskunft in flüssigen, leicht erzählenden deutschen Sprechtext um (1 bis 3 Sätze, nicht nur kurze Hauptsätze aneinanderreihen). Behalte JEDE Zahl, JEDEN Orts- und Eigennamen und JEDEN Fakt exakt bei; erfinde NICHTS hinzu. Antworte NUR mit dem umformulierten Text, ohne Anführungszeichen, ohne Vorrede.';
   try {
     const resp = await fetch(base + '/chat/completions', {
@@ -1100,7 +1142,12 @@ const server = createServer(async (req, res) => {
       const place = placeFromQuery(q) || q;
       const ff = await wikiFunFact(place);
       if (ff && ff.text) {
-        const text = stripPronunciation(await narrate(ff.text, 'funfact'));
+        // Strip IPA/pronunciation guides from the RAW Wikipedia extract too, not just narrate()'s
+        // output (naturalness-analysis.md §1): a live München fact survived with "[ˈmɪŋɐ]" intact AND
+        // a grammatically broken surrounding clause, because the LLM was shown the IPA notation
+        // mid-sentence while restyling and half-mangled it trying to "preserve every fact exactly".
+        // Removing it before the prompt means there's nothing left for the LLM to reproduce or mangle.
+        const text = stripPronunciation(await narrate(stripPronunciation(ff.text), 'funfact'));
         let au = null; try { au = await ttsSpeak(text, 'primary', false, false, userKey); } catch {}
         return jsonRes(res, 200, { kind: 'funfact', text, audioUrl: proxied(au), title: ff.title, url: ff.url });
       }
