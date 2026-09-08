@@ -470,6 +470,17 @@
   // dropped silently (never shown/spoken, slot still filled with null so the queue keeps moving)
   // instead of queued anyway -- regardless of which code path produced the stale fetch.
   let activeFillerQuery=null;
+  // Live regression found via Playwright network capture (2026-09): a funfact (n=2, needs a live
+  // wiki+narrate+TTS chain over the single-slot chanLimit=1 channel) took ~19s to resolve while
+  // /answer came back in ~7s. deliver() correctly waits for runFillerLoop to settle before queuing the
+  // answer slot (so ORDER holds -- an earlier, still-unfilled slot always blocks pump() from reaching a
+  // later one, by design, regardless of whether deliver() awaits anything). Without a bound, that made
+  // the ENTIRE turn -- including the already-ready answer -- wait out the slowest filler: reported live
+  // as "just an endless filler loop", the funfact effectively never being heard in time to matter, and
+  // the follow-up never being reached. Fix: race every filler fetch against a timeout; past it, treat
+  // the slot as silent (skipped instantly by pump(), see fill()) instead of waiting indefinitely.
+  const FILLER_TIMEOUT_MS=6000;
+  function withTimeout(p, ms){ return Promise.race([p, new Promise((res)=>setTimeout(()=>res(null), ms))]); }
   async function runFillerLoop(query, preFetched){
     activeFillerQuery=query;
     const inFlight=[];   // [{s, p}] in playback order
@@ -478,7 +489,7 @@
     for(let i=0;i<FILLER_LOOKAHEAD && awaitingAnswer;i++) launch();
     while(inFlight.length){
       const {s,p}=inFlight.shift();
-      const f=await p;
+      const f=await withTimeout(p, FILLER_TIMEOUT_MS);
       const stale=activeFillerQuery!==query;
       if(!stale && f&&f.kind==='funfact'&&f.text) showFunfact(f);
       fill(s, (!stale && f&&f.audioUrl&&speakFillerKind(f.kind))?f.audioUrl:null);
