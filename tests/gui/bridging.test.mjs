@@ -63,8 +63,12 @@ test('N1: takeFact before any production → F1 generic; after produceFact → t
   const f3 = bridging.takeFact('Kiel', 'c2');        // another caller may hear it
   assert.equal(f3.audioUrl, f1.audioUrl);
   await bridging.produceFact('Hamburg', 'system');
-  const f4 = bridging.takeFact('Lübeck', 'c3');      // no fact for Lübeck → freshest prepared one
-  assert.ok(f4.text.includes('Hamburg'));
+  // a question about Lübeck never gets another place's fact (it sounded random): F1 generic instead
+  const f4 = bridging.takeFact('Lübeck', 'c3');
+  assert.ok(bridging.F1_FACTS.includes(f4.text)); assert.equal(f4.place, null);
+  // only a question WITHOUT a place may take the freshest prepared fact
+  const f5 = bridging.takeFact('', 'c3');
+  assert.ok(f5.text.includes('Hamburg'));
 });
 
 test('inviteText derives a closed question from a validated suggestion', () => {

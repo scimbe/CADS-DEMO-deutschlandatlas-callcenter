@@ -155,18 +155,34 @@ export const INVARIANTS = [
   'I1 ONE ordered player: parts are spoken strictly in queue order; a clip that is playing is never interrupted or cut',
   'I2 the Atlas answer has priority: the moment it is ready, every SOFT part not yet started is dropped and the answer plays right after the current clip',
   'I3 the opener is prepared material and plays at t=0 on utterance; its kind is openerKind(turnCount, pivot, continued) — never keyed on last-answer success',
-  'I4 "Wussten Sie schon" is never fetched live during a wait: it is an N1 fact produced after a PREVIOUS answer, or an F1 pool clip; a wait with nothing prepared just gets a GAP',
+  'I4 "Wussten Sie schon" is never fetched live during a wait: it is an N1 fact prepared for THIS question\'s place (produced at /understand or after a previous answer) or an F1 pool clip — never a prepared fact about some OTHER place; a wait with nothing prepared just gets a GAP',
   'I5 bridging parts are requested one at a time (lookahead 1) and are all prepared, except the short VERSTEHEN echo which is skipped if it is not ready in time',
   'I6 after EVERY answer (success or failure) the next opener and N1 facts for the likely next places are prepared in the background at low priority',
   'I7 the greeting plays on the first caller gesture, from the pool, and is distinct from the turn-0 service intro',
   'I8 the invite offers only "Ja" + concrete, validated alternatives (never a "Nein"); it is spoken after the answer only if ready within the grace window, else offered silently as bubbles',
   'I9 answer TTS is high priority; all bridging TTS is low priority; every LLM/pipeline/TTS call retries transient failures',
   'I10 every spoken string passes the same sanitizer (IPA, gender notation) exactly once, inside ttsSpeak',
+  'I11 a bare spoken "Ja" while a follow-up offer is open IS the offered question: it is asked as a continuation without an LLM round trip; a qualified yes goes to the LLM with the offer in its context',
 ];
 
 /** A compact, serializable view for GET /fsm and the n8n mirror. */
+/** A bare affirmation ("ja", "ja bitte", "gerne", "ok", "genau", "klar") — nothing but consent. */
+const AFFIRMATION = /^(ja|jа|ja bitte|ja gerne|ja gern|bitte|gerne|gern|okay|ok|klar|genau|sicher|natürlich|unbedingt|ja klar|ja genau|ja natürlich|ja unbedingt|jo|jup|jep|yes)[\s!.…]*$/i;
+export const isAffirmation = (text) => AFFIRMATION.test(String(text || '').trim());
+
+/**
+ * I11: an offered follow-up ("Möchten Sie auch … wissen?" with the ✓-Ja bubble) is answered by voice as
+ * often as by click. A bare "Ja" while an offer is open resolves to the offered question WITHOUT a
+ * round trip to the LLM; anything else is a new/pivoting question. offered = { suggestions: [...] }.
+ */
+export function resolveOffered(text, offered) {
+  const sug = (offered && offered.suggestions) || [];
+  if (!sug.length) return null;
+  return isAffirmation(text) ? sug[0] : null;
+}
+
 export function describe() {
   return { parts: PART, partClass: PART_CLASS, openerKinds: OPENER_KIND, bridgeKinds: BRIDGE_KIND, kinds: KIND, fsm: FSM, invariants: INVARIANTS };
 }
 
-export default { PART, CLASS, PART_CLASS, isSoft, OPENER_KIND, BRIDGE_KIND, KIND, openerKind, nextBridgeKind, markBridgeUsed, dropPendingSoft, FSM, INVARIANTS, describe };
+export default { PART, CLASS, PART_CLASS, isSoft, OPENER_KIND, BRIDGE_KIND, KIND, openerKind, nextBridgeKind, markBridgeUsed, dropPendingSoft, isAffirmation, resolveOffered, FSM, INVARIANTS, describe };

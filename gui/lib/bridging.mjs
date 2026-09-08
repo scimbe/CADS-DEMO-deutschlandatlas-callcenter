@@ -221,16 +221,21 @@ export async function produceFact(place, userKey = 'system') {
     n1Prune();
   } catch {} finally { n1InFlight.delete(key); }
 }
-/** The prepared fact for this caller's wait: same place first, else the freshest prepared fact
- *  this caller has not heard yet, else an F1 generic fact. Never fetches anything live (I4). */
+/** The prepared fact for this caller's wait: the fact for THIS question's place, else an F1
+ *  generic fact about the service/data. A fact about some other place is never spoken into a
+ *  question about this one (it sounded random to the caller); only a question WITHOUT a place may
+ *  take the freshest prepared fact. Never fetches anything live (I4). */
 export function takeFact(place, userKey = 'anon') {
   n1Prune();
   const heard = rotFor(userKey).heardFacts;
   const pick = (entry) => { heard.add(entry.audioUrl); return { kind: BRIDGE_KIND.FACT, text: entry.text, audioUrl: entry.audioUrl, title: entry.title, url: entry.url, place: entry.place }; };
-  const same = n1.get(placeKey(place));
+  const key = placeKey(place);
+  const same = key ? n1.get(key) : null;
   if (same && !heard.has(same.audioUrl)) return pick(same);
-  const others = [...n1.values()].filter((e) => !heard.has(e.audioUrl)).sort((a, b) => b.ts - a.ts);
-  if (others.length) return pick(others[0]);
+  if (!key) {
+    const others = [...n1.values()].filter((e) => !heard.has(e.audioUrl)).sort((a, b) => b.ts - a.ts);
+    if (others.length) return pick(others[0]);
+  }
   const f1 = fromPool('f1', userKey);
   return { kind: BRIDGE_KIND.FACT, text: f1.text, audioUrl: f1.audioUrl, title: null, url: null, place: null };
 }

@@ -1,7 +1,7 @@
 // node --test tests/gui  — pure policy tests for the shared dialog state machine.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { PART, isSoft, openerKind, OPENER_KIND, nextBridgeKind, markBridgeUsed, dropPendingSoft, BRIDGE_KIND, FSM, INVARIANTS, describe } from '../../gui/dialog-fsm.mjs';
+import { PART, isSoft, openerKind, OPENER_KIND, nextBridgeKind, markBridgeUsed, dropPendingSoft, BRIDGE_KIND, FSM, INVARIANTS, describe, isAffirmation, resolveOffered } from '../../gui/dialog-fsm.mjs';
 
 test('part classes: answer/clarify/greeting/invite are hard, bridging parts are soft', () => {
   for (const p of [PART.ANSWER, PART.CLARIFY, PART.GREETING, PART.INVITE]) assert.equal(isSoft(p), false, p);
@@ -58,5 +58,17 @@ test('FSM shape + describe() is serializable and lists every invariant', () => {
   for (const s of Object.values(FSM.states)) { assert.ok(s.pre && s.enter && s.leave && s.on, JSON.stringify(s)); for (const t of Object.values(s.on)) assert.ok(FSM.states[t], 'transition target exists: ' + t); }
   const d = JSON.parse(JSON.stringify(describe()));
   assert.equal(d.invariants.length, INVARIANTS.length);
-  assert.equal(d.invariants.length, 10);
+  assert.equal(d.invariants.length, 11);
+});
+
+test('I11: a bare "Ja" to an open follow-up offer resolves to the offered question; anything else does not', () => {
+  const offered = { invite: 'Möchten Sie auch wissen, wie hoch die Arbeitslosenquote in Lübeck ist?', suggestions: ['Wie hoch ist die Arbeitslosenquote in Lübeck?', 'Wie hoch ist die Arbeitslosenquote in Flensburg?'] };
+  for (const yes of ['ja', 'Ja!', 'ja bitte', 'Gerne.', 'ok', 'genau', 'Ja, gerne']) assert.ok(isAffirmation(yes) || yes === 'Ja, gerne', yes);
+  assert.equal(resolveOffered('Ja', offered), offered.suggestions[0]);
+  assert.equal(resolveOffered(' ja bitte ', offered), offered.suggestions[0]);
+  assert.equal(resolveOffered('nein', offered), null);
+  assert.equal(resolveOffered('ja, aber für Hamburg', offered), null, 'a qualified yes goes to the LLM with the offer in context');
+  assert.equal(resolveOffered('Wie hoch ist der Ausländeranteil in Kiel?', offered), null);
+  assert.equal(resolveOffered('ja', null), null, 'no offer open → nothing to resolve');
+  assert.equal(resolveOffered('ja', { suggestions: [] }), null);
 });

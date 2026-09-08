@@ -9,7 +9,7 @@
 //
 // The policy itself (which opener, which bridging kind next, what to drop) is imported from
 // dialog-fsm.mjs so server and client share one definition.
-import { PART, isSoft, openerKind, nextBridgeKind, markBridgeUsed, dropPendingSoft, BRIDGE_KIND, KIND } from './dialog-fsm.mjs';
+import { PART, isSoft, openerKind, nextBridgeKind, markBridgeUsed, dropPendingSoft, BRIDGE_KIND, KIND, resolveOffered } from './dialog-fsm.mjs';
 
 export class Player {
   /**
@@ -107,7 +107,7 @@ export class Dialog {
   constructor({ player, api, ui }) {
     this.player = player; this.api = api; this.ui = ui;
     this.turnCount = 0; this.history = []; this.lastQuery = null; this.lastAnswer = null;
-    this.slots = { ort: null, indikator: null }; this.pending = null; this.followupActive = false;
+    this.slots = { ort: null, indikator: null }; this.pending = null; this.followupActive = false; this.offered = null;
     this.session = null; this.nextContextBridge = null; this.turnSeq = 0; this.turn = null; this.greeted = false;
   }
 
@@ -128,14 +128,20 @@ export class Dialog {
   async ask(query) {
     query = (query || '').trim(); if (!query) return;
     this.greeted = true;
+    // I11: a spoken "Ja" to an open follow-up offer IS the offered question — no LLM round trip
+    const offeredQ = this.followupActive ? resolveOffered(query, this.offered) : null;
+    if (offeredQ) { this.ui.echoQuery('your', query); return this.deliverChoice(offeredQ, true); }
     const pivot = this.followupActive; this.followupActive = false;
+    const offered = this.offered; this.offered = null;
     const turn = this._openTurn({ query, pivot, continued: false });
     this.ui.echoQuery('your', query); this.ui.setState('listen'); this.ui.working('understanding');
     let u;
-    try { u = await this.api.understand(query, { history: this.history, lastQuery: this.lastQuery, lastAnswer: this.lastAnswer, pending: this.pending, slots: this.slots }); }
+    try { u = await this.api.understand(query, { history: this.history, lastQuery: this.lastQuery, lastAnswer: this.lastAnswer, pending: this.pending, slots: this.slots, offered }); }
     catch (e) { return this._fail(turn, e); }
     if (!turn.active) return;
     if (u.slots) this.slots = { ort: u.slots.ort || this.slots.ort, indikator: u.slots.indikator || this.slots.indikator };
+    // the place we understood is what the bridging (fact) is about while the answer is fetched
+    if (u.slots && u.slots.ort) turn.place = u.slots.ort;
     if (u.precise) { this.pending = null; turn.kind = u.kind; return this._deliver(turn, u.best_guess); }
     // CLARIFY: the question replaces the answer this turn (hard part → pending soft parts are dropped)
     turn.waiting = false; this.player.dropPendingSoft();
@@ -150,7 +156,7 @@ export class Dialog {
   }
   /** A bubble was clicked: a clarify option (fresh turn) or an offered follow-up (continuation). */
   deliverChoice(query, continued) {
-    this.pending = null; this.followupActive = false;
+    this.pending = null; this.followupActive = false; this.offered = null;
     const turn = this._openTurn({ query, pivot: false, continued, resolved: true });
     this.ui.echoQuery(continued ? 'follow' : 'question', query);
     return this._deliver(turn, query);
@@ -193,7 +199,7 @@ export class Dialog {
   }
 
   async _deliver(turn, query) {
-    turn.resolvedQuery = query; turn.place = null; turn.bridge.understood = true;
+    turn.resolvedQuery = query; turn.bridge.understood = true;
     // if a GAP is queued but not started, let the verstehen echo take its place (drop just that gap;
     // the opener ahead of it stays — it is what the caller hears first)
     const pendingGap = this.player.queue.find((it) => it.part === BRIDGE_KIND.GAP && !it.started && !it.played);
@@ -227,8 +233,9 @@ export class Dialog {
         const items = [{ label: '✓ Ja', best: true, onClick: () => this.deliverChoice(sug[0], true) },
           ...sug.slice(1).map((s) => ({ label: s, onClick: () => this.deliverChoice(s, true) }))];
         this.ui.bubbles(items, 'followup', '💬 ' + (f.invite || this.ui.t('inviteFallback')));
+        this.offered = { invite: f.invite || '', suggestions: sug };
         this.followupActive = true;
-      } else { this.ui.examples(); this.followupActive = false; }
+      } else { this.ui.examples(); this.followupActive = false; this.offered = null; }
       return f.inviteAudioUrl || null;
     } catch { return null; }
   }
