@@ -181,3 +181,37 @@ test('a new question typed while a follow-up is on offer opens with the topic-ac
   await tick(300); await done(player);
   assert.ok(a.log.includes('/topic_ack0.wav'));
 });
+
+test('I11: a spoken "Ja" while a follow-up is on offer asks the offered question (no understand round trip)', async () => {
+  const a = fakeAudio();
+  const player = new Player(a), api = fakeApi({ answerMs: 20 }), ui = fakeUi();
+  const d = new Dialog({ player, api, ui });
+  await d.start([]);
+  d.ask('Wie hoch ist die Arbeitslosenquote in Kiel?');
+  await tick(300); await done(player);
+  assert.equal(d.followupActive, true);
+  assert.deepEqual(d.offered.suggestions, ['Wie hoch ist die Arbeitslosenquote in Lübeck?']);
+  const understands = api.calls.filter((c) => c[0] === 'understand').length;
+  d.ask('Ja');
+  await tick(300); await done(player);
+  assert.equal(api.calls.filter((c) => c[0] === 'understand').length, understands, 'no LLM round trip for a bare Ja');
+  assert.equal(api.calls.at(-1)[0] === 'answer' || api.calls.some((c) => c[0] === 'answer' && c[1] === 'Wie hoch ist die Arbeitslosenquote in Lübeck?'), true);
+  assert.ok(api.calls.some((c) => c[0] === 'answer' && c[1] === 'Wie hoch ist die Arbeitslosenquote in Lübeck?'), 'the offered question was asked');
+  assert.ok(a.log.includes('/continuation0.wav'), 'a continuation opener, not a topic ack');
+  assert.equal(d.turnCount, 2);
+});
+
+test('the understood place reaches the fact bridge while the answer is fetched', async () => {
+  const a = fakeAudio({ '/service_intro0.wav': 30, '/gap1.wav': 30, '/verstehen2.wav': 30, '/fact3.wav': 30 });
+  const player = new Player(a), ui = fakeUi();
+  const api = fakeApi({ answerMs: 250 });
+  const seen = [];
+  const bridge = api.bridge; api.bridge = async (kind, query, place) => { seen.push([kind, place]); return bridge(kind, query, place); };
+  const d = new Dialog({ player, api, ui });
+  await d.start([]);
+  d.ask('Wie hoch ist die Arbeitslosenquote in Kiel?');
+  await tick(500); await done(player);
+  const fact = seen.find((s) => s[0] === 'fact');
+  assert.ok(fact, 'a fact bridge was requested during the slow answer');
+  assert.equal(fact[1], 'Kiel', 'with the place understood for THIS question');
+});

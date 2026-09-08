@@ -105,6 +105,9 @@ async function handle(req, res) {
       // returned (that race left slow turns without any follow-up).
       const place = (u.slots && u.slots.ort) || placeFromQuery(u.best_guess) || '';
       swapCityFollowups(u.best_guess, place, 3).forEach((s) => { answerFor(s, false, userKey); });
+      // N1 for THIS place too (low priority): a slow answer then gets a fact about the place asked
+      // about, never one about a different place (the fact bridge is same-place or generic only)
+      if (place) produceFactsFor([place], userKey);
     }
     let clarifyAudioUrl = null;
     if (!u.precise && u.clarify) { try { clarifyAudioUrl = proxied(await ttsSpeak(u.clarify, { priority: true, userKey })); } catch {} }

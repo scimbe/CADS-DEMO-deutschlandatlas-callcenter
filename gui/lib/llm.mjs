@@ -1,4 +1,5 @@
 // LLM-backed dialogue steps (litellm-proxy, OpenAI-compatible) + the Wikipedia fact source.
+import { resolveOffered } from '../dialog-fsm.mjs';
 // Every step degrades gracefully (empty object / original text / null) and retries transient
 // proxy resets. CC_STUB=1 replaces all of them with deterministic offline stand-ins so the whole
 // dialogue can be exercised (tests, offline demo) without a proxy or the network.
@@ -132,6 +133,9 @@ export function normSlots(s) {
 
 const STUB_INDICATORS = ['Arbeitslosenquote', 'Ausländeranteil', 'Steuereinnahmekraft', 'Breitbandversorgung', 'Straftatenquote', 'Hausärzte', 'Schulabgänger', 'Ladepunkte', 'Ärzte'];
 function stubUnderstand(query, context) {
+  const offeredQ = resolveOffered(query, context && context.offered);
+  if (offeredQ) { const place = placeFromQuery(offeredQ); const ind = STUB_INDICATORS.find((i) => offeredQ.toLowerCase().includes(i.toLowerCase())) || null;
+    return { kind: 'anschluss', precise: true, clarify: '', best_guess: offeredQ, options: [], slots: { ort: place, indikator: ind } }; }
   const pending = context && context.pending;
   const hist = (context && context.history) || [];
   const last = hist[hist.length - 1];
@@ -154,6 +158,9 @@ function stubUnderstand(query, context) {
 }
 
 export async function understand(query, context, CATALOG_SUMMARY = '') {
+  // I11: "Ja" to an open follow-up offer is the offered question — deterministic, no model call
+  const offeredQ = resolveOffered(query, context && context.offered);
+  if (offeredQ) return { kind: 'anschluss', precise: true, clarify: '', best_guess: offeredQ, options: [], slots: normSlots({ ort: placeFromQuery(offeredQ) }) };
   if (STUB) { await sleep(Number(process.env.CC_STUB_UNDERSTAND_MS) || 1200); return stubUnderstand(query, context); }
   const catalog = CATALOG_SUMMARY ? '\n\nVERFÜGBARE INDIKATOREN — best_guess und options MÜSSEN sich mit einem davon beantworten lassen:\n' + CATALOG_SUMMARY : '';
   const pending = context && context.pending;
@@ -166,7 +173,11 @@ export async function understand(query, context, CATALOG_SUMMARY = '') {
     u = await llmJSON(CLARIFY_SYS + catalog, ask);
     kind = 'klarstellung';
   } else {
-    u = await llmJSON(UNDERSTAND_SYS + catalog, memoryBlock(context) + 'Neue Eingabe: ' + query);
+    const offered = context && context.offered;
+    const offer = offered && offered.suggestions && offered.suggestions.length
+      ? 'Offenes Angebot an den Nutzer (unsere letzte Einladung): "' + (offered.invite || '') + '" mit den angebotenen Anschlussfragen ' + JSON.stringify(offered.suggestions) + '. Eine Zustimmung mit Änderung ("ja, aber für Hamburg") meint die erste angebotene Frage mit dieser Änderung.\n'
+      : '';
+    u = await llmJSON(UNDERSTAND_SYS + catalog, memoryBlock(context) + offer + 'Neue Eingabe: ' + query);
     kind = (u.kind === 'anschluss' || u.kind === 'neu') ? u.kind : 'neu';
   }
   return {
