@@ -68,15 +68,6 @@
   .playctl.active{opacity:1}
   .playctl button{font-size:.85rem;padding:.5em .9em}
   .playctl #stopBtn{border-color:rgba(234,106,106,.4);color:var(--red)}
-  .choices{display:none;flex-direction:column;gap:8px;margin-top:14px}
-  .choices .note{font-size:.78rem;color:var(--dimmer);font-family:"IBM Plex Mono",monospace;display:flex;align-items:center;gap:.5em}
-  .choices .note .spin{width:9px;height:9px;border-radius:50%;border:1.5px solid var(--teal);border-top-color:transparent;animation:sp .8s linear infinite}
-  @keyframes sp{to{transform:rotate(360deg)}}
-  .choice{text-align:left;font-size:.94rem;padding:.62em .85em;border:1px solid var(--line);background:var(--surface);border-radius:10px;color:var(--ink);cursor:pointer;transition:all .15s}
-  .choice:hover{background:var(--surface-hover);border-color:var(--edge)}
-  .choice.best{border-color:rgba(53,194,168,.5)}
-  .choice.best b{color:var(--teal)}
-  .choice small{display:block;color:var(--dimmer);font-family:"IBM Plex Mono",monospace;font-size:.68rem;margin-top:2px}
   .src{margin-top:12px;font-family:"IBM Plex Mono",monospace;font-size:.74rem;color:var(--dim);border-top:1px dashed var(--line);padding-top:10px;display:none;align-items:center;gap:.6em;flex-wrap:wrap}
   .src .tick{color:var(--teal)} .src.refuse .tick{color:var(--amber)}
   .src .pill{border:1px solid var(--line);border-radius:6px;padding:.15em .5em;color:var(--ink)}
@@ -141,7 +132,6 @@
     <div class="funfact" id="funfact"></div>
   </div>
   <audio id="player"></audio>
-  <audio id="filler"></audio>
 
   <footer>
     <div class="fl"><a class="support" href="https://scimbe.github.io/CADS-agent-marketplace-docs/how-to/install-and-customize-a-demo/" target="_blank" rel="noopener" data-i18n="footerInstall">Lokal installieren &amp; anpassen ↗</a></div>
@@ -150,8 +140,10 @@
   </footer>
 </div>
 
-<script>
+<script type="module">
+import { Player, Dialog } from '/dialog-client.mjs';
 (() => {
+  // ---------- orb + state chip ----------
   const canvas=document.getElementById('viz'), ctx=canvas.getContext('2d');
   const reduce=matchMedia('(prefers-reduced-motion:reduce)').matches;
   let W=0,H=0,DPR=1;
@@ -159,14 +151,12 @@
   new ResizeObserver(resize).observe(canvas.parentElement); resize();
   const ST={idle:{n:'Bereit',c:'#35C2A8',b:.10},listen:{n:'Zuhören',c:'#5E8DEF',b:.5},think:{n:'Verstehen',c:'#E4B24A',b:.22},
     query:{n:'Live-Abfrage',c:'#5E8DEF',b:.3},speak:{n:'Antworten',c:'#DC8845',b:.55},done:{n:'Fertig',c:'#35C2A8',b:.12}};
-  // --- i18n: DE/EN chrome toggle. Spoken answers + Deutschlandatlas data stay German (Thorsten voice,
-  // German indicators); only the visible UI chrome switches. Example questions stay German (they are the
-  // actual queries the German-data pipeline answers). tr('lang') is the only global text switch. ---
+  // ---------- i18n: DE/EN chrome only; spoken answers + data stay German ----------
   const I18N={
     de:{ eyebrow:'Deutschlandatlas · Sprach-Callcenter', h1:'Stellen Sie eine Frage — die Antwort kommt aus echten, live abgefragten Daten.',
-      lede:'Fragen Sie zu einem Ort in Deutschland (Kriminalität, Bildung, Beschäftigung, Wohnen …). Der Agent sucht die passende Deutschlandatlas-Tabelle, fragt sie live ab und antwortet geerdet — oder lehnt ehrlich ab.',
-      welcome:'👋 Willkommen — klicken oder tippen, dann begrüße ich Sie', placeholder:'Ihre Frage, z. B. Wie hoch ist die Straftatenquote in Kiel?',
-      micTitle:'Sprechen (Deutsch)', go:'Fragen', pause:'⏸ Pause', resume:'▶︎ Weiter', stop:'⏹ Stopp', ffLabel:'„Wussten Sie schon" vorlesen', ffTitle:'„Wussten Sie schon" nur anzeigen, nicht vor der Antwort vorlesen (dann entsteht ggf. eine kurze Pause)',
+      lede:'Fragen Sie zu einem Ort in Deutschland (Bildung, Beschäftigung, Wohnen, Infrastruktur …). Der Agent sucht die passende Deutschlandatlas-Tabelle, fragt sie live ab und antwortet geerdet — oder lehnt ehrlich ab.',
+      welcome:'👋 Willkommen — klicken oder tippen, dann begrüße ich Sie', placeholder:'Ihre Frage, z. B. Wie hoch ist die Arbeitslosenquote in Kiel?',
+      micTitle:'Sprechen (Deutsch)', go:'Fragen', pause:'⏸ Pause', resume:'▶︎ Weiter', stop:'⏹ Stopp', ffLabel:'„Wussten Sie schon" vorlesen', ffTitle:'„Wussten Sie schon" nur anzeigen, nicht als Überbrückung vorlesen',
       more:'mehr anzeigen ▾', less:'weniger anzeigen ▴', aDefault:'Stellen Sie Ihre Frage oben.', replay:'🔊 Antwort abspielen',
       footerInstall:'Lokal installieren & anpassen ↗', footerSupport:'Als Mitglied unterstützen →', footerNote:'Antworten aus der Live-Deutschlandatlas-API · nichts erfunden · ',
       state_idle:'Bereit', state_listen:'Zuhören', state_think:'Verstehen', state_query:'Live-Abfrage', state_speak:'Antworten', state_done:'Fertig',
@@ -174,15 +164,15 @@
       understanding:'Ich verstehe Ihre Frage …', fetching:'Ich hole die Antwort …', processingRec:'Ich verarbeite Ihre Aufnahme …', listening:'🎙️ Ich höre zu … (zum Stoppen erneut auf 🎙️ tippen)',
       connError:'Verbindungsfehler: ', busy:'Gerade ist viel los — bitte stellen Sie Ihre Frage gleich noch einmal.', micUnclear:'Ich habe Sie leider nicht verstanden — bitte sprechen Sie noch einmal.', clarify:'Können Sie Ihre Frage etwas genauer stellen?', noAnswer:'Dazu habe ich leider keine Antwort erhalten.',
       approx:'⚠ Näherung', approxTxt:'keine exakten Daten — beste verfügbare Näherung', groundedLive:'✓ geerdet · Live-Quelle', reused:' · wiederverwendet', liveRows:' Live-Zeile(n)',
-      qYour:'Ihre Frage:', qFollow:'Weiter gefragt:', qQuestion:'Frage:', ffHeader:'💡 Wussten Sie schon?', wikiSource:'Quelle: Wikipedia', inviteFallback:'Möchten Sie noch etwas wissen?',
+      qYour:'Ihre Frage:', qFollow:'Weiter gefragt:', qQuestion:'Frage:', ffHeader:'💡 Wussten Sie schon?', wikiSource:'Quelle: Wikipedia', inviteFallback:'Möchten Sie noch etwas wissen?', preparing:'Wahrscheinlichste Antwort wird bereits vorbereitet …',
       sttFail:'Ich habe leider nichts verstanden — bitte erneut auf 🎙️ tippen und sprechen, oder tippen Sie Ihre Frage.', sttError:'Spracherkennung fehlgeschlagen — bitte tippen Sie Ihre Frage.',
       speechInput:'Spracheingabe: ', micDenied:'Bitte erlauben Sie den Mikrofon-Zugriff in Ihrem Browser.', micNotFound:'Es wurde kein Mikrofon gefunden.',
       micUnavail:'Mikrofon nicht verfügbar. Es könnte auch am Browser liegen — unterstützt sind aktuelle Chrome, Edge, Firefox und Safari. Sie können die Frage auch tippen.',
       micUnsupported:'Sprachaufnahme wird von diesem Browser nicht unterstützt (aktuelle Chrome, Edge, Firefox oder Safari verwenden).' },
     en:{ eyebrow:'Deutschlandatlas · Voice Callcenter', h1:'Ask a question — the answer comes from real, live-queried data.',
-      lede:'Ask about a place in Germany (crime, education, employment, housing …). The agent finds the matching Deutschlandatlas table, queries it live and answers grounded — or honestly declines.',
-      welcome:'👋 Welcome — click or type and I will greet you', placeholder:'Your question, e.g. What is the crime rate in Kiel?',
-      micTitle:'Speak (German)', go:'Ask', pause:'⏸ Pause', resume:'▶︎ Resume', stop:'⏹ Stop', ffLabel:'Read out “Did you know”', ffTitle:'Only show “Did you know”, do not read it out before the answer (may cause a short pause)',
+      lede:'Ask about a place in Germany (education, employment, housing, infrastructure …). The agent finds the matching Deutschlandatlas table, queries it live and answers grounded — or honestly declines.',
+      welcome:'👋 Welcome — click or type and I will greet you', placeholder:'Your question, e.g. Wie hoch ist die Arbeitslosenquote in Kiel?',
+      micTitle:'Speak (German)', go:'Ask', pause:'⏸ Pause', resume:'▶︎ Resume', stop:'⏹ Stop', ffLabel:'Read out “Did you know”', ffTitle:'Only show “Did you know”, do not read it out as bridging',
       more:'show more ▾', less:'show less ▴', aDefault:'Ask your question above.', replay:'🔊 Play answer',
       footerInstall:'Install & customize locally ↗', footerSupport:'Support as a member →', footerNote:'Answers from the live Deutschlandatlas API · nothing invented · ',
       state_idle:'Ready', state_listen:'Listening', state_think:'Understanding', state_query:'Live query', state_speak:'Answering', state_done:'Done',
@@ -190,7 +180,7 @@
       understanding:'Understanding your question …', fetching:'Fetching the answer …', processingRec:'Processing your recording …', listening:'🎙️ Listening … (tap 🎙️ again to stop)',
       connError:'Connection error: ', busy:'It is quite busy right now — please ask your question again in a moment.', micUnclear:'Sorry, I did not catch that — please try again.', clarify:'Could you phrase your question a bit more precisely?', noAnswer:'Sorry, I did not get an answer for that.',
       approx:'⚠ Approximation', approxTxt:'no exact data — best available approximation', groundedLive:'✓ grounded · live source', reused:' · reused', liveRows:' live row(s)',
-      qYour:'Your question:', qFollow:'Follow-up:', qQuestion:'Question:', ffHeader:'💡 Did you know?', wikiSource:'Source: Wikipedia', inviteFallback:'Would you like to know anything else?',
+      qYour:'Your question:', qFollow:'Follow-up:', qQuestion:'Question:', ffHeader:'💡 Did you know?', wikiSource:'Source: Wikipedia', inviteFallback:'Would you like to know anything else?', preparing:'The most likely answer is already being prepared …',
       sttFail:'Sorry, I did not catch that — tap 🎙️ again and speak, or type your question.', sttError:'Speech recognition failed — please type your question.',
       speechInput:'Voice input: ', micDenied:'Please allow microphone access in your browser.', micNotFound:'No microphone was found.',
       micUnavail:'Microphone unavailable. It may also be the browser — supported are current Chrome, Edge, Firefox and Safari. You can also type your question.',
@@ -198,6 +188,7 @@
   };
   let lang=(()=>{ try{ return localStorage.getItem('cc_lang')==='en'?'en':'de'; }catch(e){ return 'de'; } })();
   const tr=(k)=> (I18N[lang]&&I18N[lang][k]!=null) ? I18N[lang][k] : (I18N.de[k]!=null?I18N.de[k]:'');
+  let state='idle',amp=.1,col=[53,194,168],colT=[53,194,168],t=0,speaking=false;
   function applyStatic(){
     try{ document.documentElement.lang=lang;
       document.querySelectorAll('[data-i18n]').forEach(el=>{ el.textContent=tr(el.getAttribute('data-i18n')); });
@@ -208,7 +199,6 @@
     }catch(e){}
   }
   function setLang(l){ lang=(l==='en')?'en':'de'; try{ localStorage.setItem('cc_lang',lang); }catch(e){} applyStatic(); try{ renderExamples(); }catch(e){} }
-  let state='idle',amp=.1,col=[53,194,168],colT=[53,194,168],t=0,speaking=false;
   const N=80,ph=new Float32Array(N).map(()=>Math.random()*6.28);
   const hex=h=>[parseInt(h.slice(1,3),16),parseInt(h.slice(3,5),16),parseInt(h.slice(5,7),16)];
   const lerp=(a,b,f)=>a+(b-a)*f, mix=(a,b,f)=>a.map((x,i)=>lerp(x,b[i],f)), rgba=(c,a)=>`rgba(${c[0]|0},${c[1]|0},${c[2]|0},${a})`;
@@ -232,381 +222,98 @@
     requestAnimationFrame(frame);}
   requestAnimationFrame(frame);
 
+  // ---------- DOM refs ----------
   const q=document.getElementById('q'),go=document.getElementById('go'),mic=document.getElementById('mic');
   const aEl=document.getElementById('a'),qEcho=document.getElementById('qEcho'),src=document.getElementById('src'),srcTxt=document.getElementById('srcTxt');
   const player=document.getElementById('player'),replay=document.getElementById('replay'),timerEl=document.getElementById('timer');
-  // 2026-09: 4 of the original 12 static examples were verified against catalog.json (and, for the
-  // crime ones, this repo's own README: "No crime-topic indicators exist anywhere in this dataset")
-  // to be GUARANTEED unanswerable -- clicking them always produced a "keine Daten gefunden" refusal,
-  // exactly the hallucinated-suggestion symptom reported live, except this source wasn't the LLM at
-  // all, it was a hardcoded example. Replaced with topics confirmed present in catalog.json.
-  const EX_POOL=['Wie viele Schulabgänger in Kiel haben keinen Hauptschulabschluss?','Wie viele Arbeitslose gibt es in Dresden?','Wie hoch ist die Arbeitslosenquote in Leipzig?','Wie viele Ärzte gibt es je 100.000 Einwohner in München?','Wie hoch ist die Steuereinnahmekraft in Hamburg?','Wie ist die Breitbandversorgung in Rostock?','Wie hoch ist der Ausländeranteil in Frankfurt?','Wie viele Ladepunkte für Elektroautos gibt es in Stuttgart?','Wie hoch ist die Steuereinnahmekraft in Dortmund?','Wie viele Hausärzte gibt es je 100.000 Einwohner in Hannover?','Wie hoch ist der Anteil der Schulabgänger ohne Hauptschulabschluss in Bremen?','Wie ist die Breitbandversorgung in Kiel?'];
+  const ffEl=document.getElementById('funfact'), speakFfEl=document.getElementById('speakff');
+  const playctl=document.getElementById('playctl'),pauseBtn=document.getElementById('pauseBtn'),stopBtn=document.getElementById('stopBtn');
   const exWrap=document.getElementById('examples');
+  // Example questions verified against catalog.json (topics that exist in the dataset).
+  const EX_POOL=['Wie viele Schulabgänger in Kiel haben keinen Hauptschulabschluss?','Wie hoch ist die Arbeitslosenquote in Leipzig?','Wie viele Ärzte gibt es je 100.000 Einwohner in München?','Wie hoch ist die Steuereinnahmekraft in Hamburg?','Wie ist die Breitbandversorgung in Rostock?','Wie hoch ist der Ausländeranteil in Frankfurt?','Wie viele Ladepunkte für Elektroautos gibt es in Stuttgart?','Wie hoch ist die Steuereinnahmekraft in Dortmund?','Wie viele Hausärzte gibt es je 100.000 Einwohner in Hannover?','Wie hoch ist der Anteil der Schulabgänger ohne Hauptschulabschluss in Bremen?','Wie ist die Breitbandversorgung in Kiel?','Wie hoch ist die Arbeitslosenquote in Dresden?'];
   function shuffle(a){a=a.slice();for(let i=a.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[a[i],a[j]]=[a[j],a[i]];}return a;}
-  // ONE place for suggestions: the bubble row. Examples, clarify options, and follow-ups all render here.
-  // naturalness-analysis.md §6: example bubbles (generic starters) and follow-up bubbles (actually
-  // derived from what was just answered) rendered into the identical DOM element with no distinction
-  // -- nothing prevented a stale/generic suggestion from standing in for a contextual one, and it
-  // wasn't even verifiable after the fact. `data-source` makes the origin explicit (example/clarify/
-  // followup) for anyone inspecting the DOM or writing a test against it.
-  function renderBubbles(items, noteHtml, source){exWrap.innerHTML='';
+  const examples=shuffle(EX_POOL).slice(0,3);
+  // ONE place for suggestions: examples, clarify options and follow-ups all render here, tagged by source.
+  function renderBubbles(items, source, noteHtml){exWrap.innerHTML='';
     if(noteHtml){const n=document.createElement('div');n.className='exnote';n.innerHTML=noteHtml;exWrap.appendChild(n);}
-    items.forEach(it=>{const b=document.createElement('button');b.className='ex'+(it.best?' best':'');b.textContent=it.label;b.onclick=it.onClick;b.dataset.source=it.source||source||'unknown';exWrap.appendChild(b);});}
-  function renderExamples(){renderBubbles(shuffle(EX_POOL).slice(0,3).map(x=>({label:x,onClick:()=>{q.value=x;ask();}})),null,'example');}
+    items.forEach(it=>{const b=document.createElement('button');b.className='ex'+(it.best?' best':'');b.textContent=it.label;b.onclick=it.onClick;b.dataset.source=source||'unknown';exWrap.appendChild(b);});}
+  function renderExamples(){renderBubbles(examples.map(x=>({label:x,onClick:()=>{q.value=x;ask();}})),'example');}
   renderExamples();
 
-  // instant spoken filler in THE Thorsten voice (pre-rendered, varied for naturalness) — bridges the compute wait
-  const fillerEl=document.getElementById('filler');
-  const FILLERS=[1,2,3,4,5,6].map(n=>'/fillers/filler'+n+'.wav');
-  let lastFiller=-1;
-  function playFiller(){try{let n;do{n=Math.floor(Math.random()*FILLERS.length);}while(FILLERS.length>1&&n===lastFiller);lastFiller=n;fillerEl.src=FILLERS[n];fillerEl.play().catch(()=>{});}catch(e){}}
-  function stopFiller(){try{fillerEl.pause();fillerEl.currentTime=0;}catch(e){}}
-  // Bridge the compute wait with SPOKEN filler clips (the operator's core intent): whenever the ordered
-  // queue is stalled waiting for a not-yet-ready clip (above all the slow /answer), loop pre-rendered
-  // Thorsten wait-clips on a SEPARATE audio element so the caller is never left in silence. Stopped the
-  // instant a real ordered clip starts (they play on #player; fillers on #filler, never overlapping).
-  let fillerActive=false, fillerTimer=null, awaitingAnswer=false;   // awaitingAnswer: a request is in flight (understand/answer) -> keep bridging even when the queue is momentarily empty
-  function startFillerLoop(){ if(fillerActive||userPaused||fillerTimer)return;
-    // only kick in after a real wait (>1.2s) so quick gaps between fast clips don't blip a half-word
-    fillerTimer=setTimeout(()=>{ fillerTimer=null; if(userPaused||seqBusy)return; fillerActive=true; fillerEl.onended=()=>{ if(fillerActive&&!userPaused) playFiller(); }; playFiller(); },1200); }
-  function stopFillerLoop(){ if(fillerTimer){clearTimeout(fillerTimer);fillerTimer=null;} if(!fillerActive)return; fillerActive=false; fillerEl.onended=null; stopFiller(); }
-
-  const STATUS=()=>[tr('status0'),tr('status1'),tr('status2'),tr('status3')];
+  // ---------- status / timer / typing ----------
   let statusTimer=null,tickTimer=null,t0=0;
-  function startWait(){let i=0;const S=STATUS();aEl.className='a working';aEl.textContent=S[0];
-    statusTimer=setInterval(()=>{ if(i<S.length-1){ i++; aEl.textContent=S[i]; } else { clearInterval(statusTimer); } },2600);   // advance through the phases ONCE, then hold on the last (no looping)
+  function startWait(){let i=0;const S=[tr('status0'),tr('status1'),tr('status2'),tr('status3')];aEl.className='a working';aEl.textContent=S[0];
+    stopWait(); statusTimer=setInterval(()=>{ if(i<S.length-1){ i++; aEl.textContent=S[i]; } else { clearInterval(statusTimer); } },2600);
     t0=performance.now();timerEl.style.display='block';
     tickTimer=setInterval(()=>{timerEl.textContent=((performance.now()-t0)/1000).toFixed(1).replace('.',',')+' s';},100);}
   function stopWait(){clearInterval(statusTimer);clearInterval(tickTimer);timerEl.style.display='none';}
-
   function type(el,text,done){el.className='a';el.textContent='';const cur=document.createElement('span');cur.className='cursor';el.appendChild(cur);let i=0;
     (function tick(){if(i<=text.length){el.textContent=text.slice(0,i);el.appendChild(cur);i++;setTimeout(tick,Math.max(9,1300/Math.max(1,text.length)));}else{el.textContent=text;done&&done();}})();}
-
-  // playback controls (interrupt + pause), shown while Thorsten is speaking
-  const playctl=document.getElementById('playctl'),pauseBtn=document.getElementById('pauseBtn'),stopBtn=document.getElementById('stopBtn');
-  let userPaused=false;
   function showCtl(){playctl.classList.add('active');}
-  function hideCtl(){playctl.classList.remove('active');userPaused=false;pauseBtn.textContent=tr('pause');}
+  function hideCtl(){playctl.classList.remove('active');pauseBtn.textContent=tr('pause');}
 
-  // Ordered sequential speech queue: a turn is spoken in order, each part ALWAYS finishing before the
-  // next (never cut off): Ueberbruecken (bridge) -> an OPEN-ENDED filler loop (0..N clips: Verstehen,
-  // then a real place-linked fact, then generic "still looking" variants -- see runFillerLoop) that
-  // keeps going only as long as the real answer isn't ready yet -> Atlas-Antwort -> Follow-up-Einladung.
-  // See gui/dialog-fsm.mjs (2026-09 redesign) for the canonical spec. Slots are created as each part is
-  // decided and filled once it's ready (prepared in parallel); the one player advances only once the
-  // current clip ENDED and the next slot is filled, so order holds and nothing is interrupted (even
-  // when the real answer arrives during an earlier clip).
-  let seq=[], seqBusy=false;
-  // FSM invariant I1 ("ordered/non-interruptible: P1..P5 always play to the end") was being violated
-  // here: submitting a new question (or clicking a follow-up bubble) called newTurn() immediately, which
-  // hard-stopped the player mid-clip even while the PREVIOUS turn's audio (e.g. its P5 follow-up invite)
-  // was still speaking -- reported live as a statement getting abruptly cut off. Fix: only hard-reset the
-  // player when nothing is actually playing right now; if a clip is genuinely mid-playback, just swap in
-  // the fresh (empty) `seq` and let the CURRENT clip finish naturally -- its own onended handler (`advance`,
-  // set by pump()) already does `seqBusy=false; setTimeout(pump,0)`, and that pump() call will pick up
-  // this new seq once it fires, so the new turn's first clip starts right after, not instead of, the old one.
-  function newTurn(){
-    seq=[];
-    if(seqBusy && !player.paused && !player.ended) return;   // let it finish speaking (I1) -- deferred, not skipped
-    seqBusy=false; speaking=false; stopFillerLoop();
-    try{player.pause();player.currentTime=0;player.onended=null;player.oncanplaythrough=null;}catch(e){}
-  }
-  function slot(){ const it={ready:false,url:null,played:false}; seq.push(it); return it; }
-  // Unlock audio within the user gesture (a click): browsers block a later play() once the
-  // click's transient activation has expired -- and our first real clip only plays after /context
-  // (a few seconds later). A silent play() on the gesture grants playback for the session.
+  // ---------- the ONE ordered player (dialog-fsm.mjs I1/I2) ----------
+  let lastAnswerUrl=null;
+  const speech=new Player(player,{
+    onSpeaking:(on,it)=>{ speaking=on; if(on){ showCtl(); setState('speak'); replay.style.display='none'; if(it&&it.part==='answer') lastAnswerUrl=it.url; } },
+    onIdle:()=>{ speaking=false; if(state==='speak') setState('done'); if(lastAnswerUrl){ replay.style.display='inline-block'; } },
+  });
+  // Unlock audio within the user gesture (browsers block a later play() once the gesture's activation expired).
   let audioUnlocked=false;
   function unlockAudio(){ if(audioUnlocked)return; audioUnlocked=true;
     try{ player.muted=true; player.src='data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAgD4AAAB9AAACABAAZGF0YQAAAAA=';
-      // Only tear down the SILENT unlock clip if it is still the current source. With the greeting's
-      // first-gesture unlock (#1), this .then can resolve AFTER pump() has already loaded a real clip —
-      // pausing there would stop the real answer ("höre nichts"). Guard on the data: src.
       const pr=player.play(); if(pr&&pr.then)pr.then(()=>{try{ if(String(player.src||'').startsWith('data:')){ player.pause(); player.currentTime=0; } }catch(e){} player.muted=false;}).catch(()=>{player.muted=false;}); else player.muted=false;
-    }catch(e){ player.muted=false; }
-    // also unlock the SEPARATE filler element so wait-bridging clips can autoplay later in the turn
-    try{ fillerEl.muted=true; fillerEl.src='data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAgD4AAAB9AAACABAAZGF0YQAAAAA=';
-      const fp=fillerEl.play(); if(fp&&fp.then)fp.then(()=>{try{ if(String(fillerEl.src||'').startsWith('data:')){ fillerEl.pause(); fillerEl.currentTime=0; } }catch(e){} fillerEl.muted=false;}).catch(()=>{fillerEl.muted=false;}); else fillerEl.muted=false;
-    }catch(e){ fillerEl.muted=false; } }
-  function fill(it,url){ if(!it)return; it.ready=true; it.url=url||null; pump(); }
-  function pump(){
-    if(seqBusy||userPaused) return;
-    const it=seq.find(s=>!s.played);
-    if(!it){ if(awaitingAnswer){ startFillerLoop(); return; }   // queue momentarily empty but a request is still computing -> keep bridging, more slots are coming
-      setState('done'); speaking=false; stopFillerLoop(); return; }
-    if(!it.ready){ if(it.optional){ setState('done'); speaking=false; stopFillerLoop(); return; }   // optional tail slot (follow-up invite): don't filler-bridge it — go quiet, it plays when ready
-      startFillerLoop(); return; }             // preserve order: never skip ahead of an unfilled slot — but bridge the wait with spoken fillers
-    if(!it.url){ it.played=true; pump(); return; }          // filled but silent -> skip to next
-    stopFillerLoop();                                       // a real ordered clip is about to play -> silence the filler
-    seqBusy=true; it.played=true; speaking=true; try{player.muted=false;}catch(e){} showCtl(); setState('speak'); replay.style.display='none';
-    let started=false, advanced=false;
-    // never let the queue hang on one clip: if it ends, errors, or its play() is rejected (e.g. a
-    // double-start AbortError under load), release seqBusy and move on. Previously a rejected play()
-    // only showed a replay button and left seqBusy=true -> the whole ordered queue stalled, so a
-    // fully-ready later clip never played ("höre nichts" despite ready audio).
-    const advance=()=>{ if(advanced)return; advanced=true; seqBusy=false; setTimeout(pump,0); };
-    player.onended=advance;
-    player.onerror=advance;
-    const start=()=>{ if(started||userPaused)return; started=true;   // guard: a single play() per clip -> no double-start AbortError
-      const pr=player.play();
-      if(pr&&pr.catch)pr.catch(()=>{ if(!player.ended&&(player.paused||player.currentTime===0)) advance(); });
-    };
-    player.oncanplaythrough=()=>{ player.oncanplaythrough=null; if(!userPaused) start(); };   // buffer first -> no clipped start
-    player.src=it.url; player.load();
-    setTimeout(()=>{ if(player.paused&&player.currentTime===0&&!userPaused&&seqBusy&&!started) start(); },500);
-    setTimeout(()=>{ if(seqBusy&&!advanced&&player.paused&&player.currentTime===0) advance(); },9000);   // hard stall-breaker
-  }
-  function togglePause(){
-    if(!userPaused){ userPaused=true; pauseBtn.textContent=tr('resume'); stopFillerLoop(); try{if(!player.paused)player.pause();}catch(e){} }
-    else { userPaused=false; pauseBtn.textContent=tr('pause');
-      if(player.src&&player.paused&&player.currentTime>0&&!player.ended){ player.play().catch(()=>{}); }
-      else { seqBusy=false; pump(); } }
-  }
-  function stopAll(){ seq.forEach(s=>s.played=true); seqBusy=false; speaking=false; userPaused=false; pauseBtn.textContent=tr('pause'); stopFillerLoop();
-    try{player.pause();player.currentTime=0;player.onended=null;}catch(e){} setState('done'); hideCtl(); }
-  pauseBtn.onclick=togglePause; stopBtn.onclick=stopAll;
+    }catch(e){ player.muted=false; } }
+  pauseBtn.onclick=()=>{ const p=speech.togglePause(); pauseBtn.textContent=tr(p?'resume':'pause'); };
+  stopBtn.onclick=()=>{ speech.stopAll(); hideCtl(); setState('done'); };
+  replay.onclick=()=>{ if(lastAnswerUrl){ const s=speech.enqueue('answer'); speech.fill(s,lastAnswerUrl); } };
 
-  let lastQuery=null,lastAnswer=null,history=[];   // conversation memory (multi-turn) for follow-up resolution
-  let pending=null;                                // Rasa-style pending-clarify: set while we await an answer to our own question
-  let slotsDS={ort:null,indikator:null};           // dialogue-state slots carried across turns
-  const ffEl=document.getElementById('funfact');
-  const speakFfEl=document.getElementById('speakff');
-  function speakFunfact(){ return !speakFfEl || speakFfEl.checked; }   // toggle: always SHOW the fun fact, maybe don't SPEAK it before the answer
-  function showFunfact(ff){ if(!ff||!ff.text) return; ffEl.style.display='block';
-    ffEl.innerHTML='<div class="h">'+tr('ffHeader')+'</div>'+ff.text+' <a href="'+ff.url+'" target="_blank" rel="noopener">'+tr('wikiSource')+'</a>'; }
-  function reset(){src.style.display='none';src.classList.remove('refuse');replay.style.display='none';ffEl.style.display='none';hideCtl();}
+  // ---------- API + UI adapters for the dialogue engine ----------
+  const post=(url,body)=>fetch(url,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body||{})}).then(r=>r.json());
+  const api={
+    session:(examples)=>post('/session',{examples}),
+    opener:(kind,context)=>post('/opener',{kind,context}),
+    understand:(query,context)=>post('/understand',{query,context}),
+    bridge:(kind,query,place)=>post('/bridge',{kind,query,place}),
+    answer:(query)=>post('/answer',{query}),
+    followup:(query,answer)=>post('/followup',{query,answer}),
+  };
+  const ui={
+    t:tr, setState,
+    reset(){src.style.display='none';src.classList.remove('refuse');replay.style.display='none';ffEl.style.display='none';hideCtl();stopWait();},
+    busy(b){ go.disabled=b; q.disabled=b; if(!b){ q.value=''; } },
+    echoQuery(kind,text){ qEcho.innerHTML='<span>'+tr(kind==='your'?'qYour':kind==='follow'?'qFollow':'qQuestion')+'</span> <b></b>'; qEcho.querySelector('b').textContent=text; },
+    working(key){ if(key==='fetching'){ startWait(); } else { aEl.className='a working'; aEl.textContent=tr(key); setTimeout(()=>{ if(state==='listen') setState('think'); },500); } },
+    answer(text,meta,ok,matched,reused){ stopWait(); type(aEl,text,()=>{ if(meta){src.style.display='flex';
+        if(!matched){src.classList.add('refuse');src.querySelector('.tick').textContent=tr('approx');srcTxt.textContent=tr('approxTxt');}
+        else{src.querySelector('.tick').textContent=tr('groundedLive')+(reused?tr('reused'):'');
+          srcTxt.innerHTML='<span class="pill">'+(meta.table||'—')+'</span> <span class="pill">'+(meta.place_resolved||meta.place_name_requested||'')+'</span> <span class="pill">'+(meta.live_rows_used||0)+tr('liveRows')+'</span>';} } }); },
+    showFact(ff){ ffEl.style.display='block'; ffEl.innerHTML='<div class="h">'+tr('ffHeader')+'</div>'+ff.text+' <a href="'+ff.url+'" target="_blank" rel="noopener">'+tr('wikiSource')+'</a>'; },
+    bubbles(items,source,note){ renderBubbles(items,source,note||(source==='clarify'?('<span class="spin"></span>'+tr('preparing')):null)); },
+    examples(){ renderExamples(); },
+    clarify(text){ stopWait(); aEl.className='a'; aEl.textContent=text||tr('clarify'); q.focus(); },
+    error(msg){ stopWait(); aEl.className='a'; aEl.textContent=tr('connError')+msg; },
+    ffToggle(){ return !speakFfEl || speakFfEl.checked; },
+  };
+  const dialog=new Dialog({player:speech, api, ui});
+  dialog.start(examples);
 
-  // Ueberbruecken (P1) — dialog-fsm.mjs invariants I3/I5. `turnCount` = bridges already presented this
-  // session; IT (not whether the last answer succeeded) decides service-intro (turn 0) vs. context
-  // bridge (every later turn). That is what stops the "service intro repeats every turn" regression.
-  let turnCount=0, nextIntro=null;
-  function fetchIntro(){ return fetch('/intro',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({context:{turnCount,lastQuery,lastAnswer}})}).then(r=>r.json()).catch(()=>null); }
-  async function prepareNextIntro(){ nextIntro=await fetchIntro(); }   // prefetch so P1 can play instantly (fired after the greeting, see below)
-
-  // #5: when the caller asks a NEW topic instead of the offered follow-up, open with a warm "that's
-  // also an interesting question" ack — pre-synthesized in parallel so it plays instantly in place of
-  // the usual bridge. followupActive tracks whether a follow-up is currently on offer.
-  let followupActive=false, nextTopicAck=null;
-  function fetchTopicAck(){ return fetch('/topicack',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({})}).then(r=>r.json()).catch(()=>null); }
-  async function prepareTopicAck(){ nextTopicAck=await fetchTopicAck(); }
-
-  // #1: spoken greeting on the caller's FIRST interaction. Browsers block audio autoplay on a bare
-  // page load, so we prepare the clip up front and play it the instant the user first clicks/taps —
-  // as close to "on load" as the autoplay policy allows. Distinct from the turn-0 service intro.
-  let greeted=false, greetingClip=null, greetWanted=false, greetPlayed=false;
-  // Play the greeting ONLY if we're still at a clean idle start (nothing queued, no typed question) --
-  // so a greeting that becomes ready late never talks over an already-started question. greetPlayed
-  // guards against a double play (from the gesture and from prepareGreeting resolving).
-  function playGreeting(){ if(greetPlayed) return; if(greetingClip && seq.length===0 && !(q.value && q.value.trim())){ greetPlayed=true; newTurn(); const s=slot(); fill(s, greetingClip); } }
-  async function prepareGreeting(){ try{ greetingClip=(await (await fetch('/greeting',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({})})).json()).audioUrl; }catch(e){ greetingClip=null; } if(greetWanted) playGreeting(); }
-  // Fire the greeting FIRST and ALONE: it's the first thing the caller hears, and all three boot
-  // prefetches share the single chanLimit=1 channel slot. When /intro + /topicack were queued ahead of
-  // it (services measured /intro done ~8s, /topicack ~14s, greeting still not started at 15s), the
-  // greeting waited ~15-25s or never arrived. Only once its clip is ready do we warm the turn-1 intro +
-  // topic-ack -- still ready well before the first answer's pipeline finishes.
-  prepareGreeting().then(() => { prepareNextIntro(); prepareTopicAck(); });
+  // ---------- greeting on the FIRST gesture (I7), welcome hint ----------
   const welcomeHintEl=document.getElementById('welcomeHint');
   function hideWelcome(){ if(welcomeHintEl) welcomeHintEl.classList.add('gone'); }
-  function firstGesture(e){
-    if(greeted) return;
-    unlockAudio();                                                 // satisfy autoplay within the gesture
-    if(e && e.target && e.target.closest && e.target.closest('#go')) return;  // they're submitting a question -> the intro is the opener
-    greeted=true; hideWelcome();
-    // Bug fix (greeting race): remember the intent to greet, then play now if the clip is already
-    // synthesised, otherwise prepareGreeting() plays it the moment it resolves -- so a fast click
-    // (before /greeting returns) no longer permanently loses the greeting.
-    greetWanted=true; playGreeting();
-  }
-  document.addEventListener('pointerdown', firstGesture, true);
+  document.addEventListener('pointerdown', (e)=>{
+    if(dialog.greeted) return;
+    unlockAudio();
+    if(e && e.target && e.target.closest && e.target.closest('#go')) return;   // submitting: the turn-0 opener is the first thing heard
+    hideWelcome();
+    if(dialog.session) dialog.greet(); else dialog.start(examples).then(()=>dialog.greet());
+  }, true);
 
-  // start-of-turn bridge (P1): ALWAYS reserve the slot first (keeps the P1..P5 order intact), then fill
-  // it the instant the clip is ready — from the prefetch if present, otherwise fetched now. It never
-  // leaves P1 empty and never races the previous turn's prepareNextIntro(). Presenting a bridge advances
-  // turnCount, so the NEXT bridge is a context bridge even if a clarify detour or a failed answer sits
-  // in between (invariant I5: the machine can't regress to the service intro).
-  function startBridge(){
-    const s=slot();
-    if(nextIntro && nextIntro.audioUrl){ const n=nextIntro; nextIntro=null; fill(s, n.audioUrl); }
-    else {
-      // The bridge is a TIME-FILLER and is normally prefetched (instant). If it was NOT ready (e.g. Piper
-      // under load, or the very first turn), don't let its synth STALL the ordered queue — the already-
-      // ready Verstehen/Fun-Fact behind it would otherwise sit silent until the bridge (and thus the whole
-      // wait) finished. Fill it as soon as it arrives, but if that takes too long, skip it (fill null →
-      // pump moves on) so the ready short parts play immediately.
-      let filled=false;
-      const put=(url)=>{ if(filled)return; filled=true; nextIntro=null; fill(s, url); };
-      fetchIntro().then(intro=>put(intro && intro.audioUrl));
-      setTimeout(()=>put(null), 1800);
-    }
-    turnCount++;
-  }
-  // /filler: one clip at a time, n=1 Verstehen, n=2 a real place-linked fact, n>=3 generic (see
-  // gui/server.mjs's /filler route + gui/dialog-fsm.mjs FILLER_KIND).
-  function fetchFiller(query,n){ return fetch('/filler',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({query,n})}).then(r=>r.json()).catch(()=>null); }
-  // funfact toggle: always SHOW a fact when one plays, maybe don't SPEAK it (checkbox); every other
-  // filler kind is always spoken.
-  function speakFillerKind(kind){ return kind!=='funfact' || speakFunfact(); }
-  // The open-ended filler loop (dialog-fsm.mjs invariant I10): keep a small LOOKAHEAD of filler
-  // requests already in flight, refilling it as each resolves, for as long as `awaitingAnswer` is true
-  // -- stopping the INSTANT the real answer is ready (whatever filler is already playing/queued still
-  // finishes, I1, but no further filler is requested after that, so a fast answer sees fewer, or zero,
-  // fillers instead of a fixed padded set).
-  //
-  // 2026-09 fix ("alles wird sequentiell gemacht" feedback): this used to fetch ONE filler, wait for it
-  // to actually START PLAYING, and only THEN fetch the next -- so every filler paid a full client<->
-  // server round trip (plus the server's own TTS-channel synth time) back to back, with the channel
-  // sitting briefly idle between requests waiting for the client to ask again. Now up to LOOKAHEAD
-  // requests are fired concurrently and slots are created in ORDER upfront (so playback order is fixed
-  // by creation order, not by which fetch happens to resolve first) -- the server's chanLimit=1 queue
-  // (see gui/server.mjs) can then process them back-to-back with zero client-round-trip gap in between,
-  // so as much audio as possible is already sitting in the queue by the time it's actually needed. This
-  // relies on /filler now marking all filler TTS as LOW priority (see that route) so this buffering
-  // never causes a filler to outrank / delay the real answer's own (high-priority) TTS call.
-  const FILLER_LOOKAHEAD=2;
-  // naturalness-analysis.md §3: a live run captured the SAME turn's "verstehen" filler spoken TWICE,
-  // 5.4s apart, in two different wordings -- one for the raw typed/pre-reformulation text (a
-  // speculative prefetch fired before /understand resolves, see ask()), one for the LLM-resolved
-  // best_guess text. `activeFillerQuery` marks which query is currently authoritative for filler
-  // content; any filler response for a query that's been superseded by the time it resolves is
-  // dropped silently (never shown/spoken, slot still filled with null so the queue keeps moving)
-  // instead of queued anyway -- regardless of which code path produced the stale fetch.
-  let activeFillerQuery=null;
-  // Live regression found via Playwright network capture (2026-09): a funfact (n=2, needs a live
-  // wiki+narrate+TTS chain over the single-slot chanLimit=1 channel) took ~19s to resolve while
-  // /answer came back in ~7s. deliver() correctly waits for runFillerLoop to settle before queuing the
-  // answer slot (so ORDER holds -- an earlier, still-unfilled slot always blocks pump() from reaching a
-  // later one, by design, regardless of whether deliver() awaits anything). Without a bound, that made
-  // the ENTIRE turn -- including the already-ready answer -- wait out the slowest filler: reported live
-  // as "just an endless filler loop", the funfact effectively never being heard in time to matter, and
-  // the follow-up never being reached. Fix: race every filler fetch against a timeout; past it, treat
-  // the slot as silent (skipped instantly by pump(), see fill()) instead of waiting indefinitely.
-  const FILLER_TIMEOUT_MS=6000;
-  function withTimeout(p, ms){ return Promise.race([p, new Promise((res)=>setTimeout(()=>res(null), ms))]); }
-  async function runFillerLoop(query, preFetched){
-    activeFillerQuery=query;
-    const inFlight=[];   // [{s, p}] in playback order
-    let n=1;
-    function launch(){ const s=slot(); const p=(preFetched&&preFetched[n-1])||fetchFiller(query,n); n++; inFlight.push({s,p}); }
-    for(let i=0;i<FILLER_LOOKAHEAD && awaitingAnswer;i++) launch();
-    while(inFlight.length){
-      const {s,p}=inFlight.shift();
-      const f=await withTimeout(p, FILLER_TIMEOUT_MS);
-      const stale=activeFillerQuery!==query;
-      if(!stale && f&&f.kind==='funfact'&&f.text) showFunfact(f);
-      fill(s, (!stale && f&&f.audioUrl&&speakFillerKind(f.kind))?f.audioUrl:null);
-      if(!stale && awaitingAnswer) launch();   // top the buffer back up to LOOKAHEAD -- still only while it's actually needed
-    }
-  }
-
-  // phase 1 - understand & guide (targeted clarifying question; speculation starts server-side)
-  async function ask(){
-    const query=q.value.trim(); if(!query) return; unlockAudio();
-    greeted=true; hideWelcome();   // asking counts as greeted — the turn-0 intro is the opener, no separate greeting
-    awaitingAnswer=true;           // request in flight -> fillers bridge the whole compute wait (incl. the /understand phase before slots exist)
-    const pivot=followupActive; followupActive=false;   // typed a new question while a follow-up was on offer
-    go.disabled=true; q.disabled=true; reset(); newTurn();
-    // #5: on a topic pivot, open with the pre-synthesized "also an interesting question" ack instead of
-    // the usual bridge (both fill the wait during understand; the ack additionally acknowledges the switch).
-    if(pivot && nextTopicAck && nextTopicAck.audioUrl){ const s=slot(); fill(s, nextTopicAck.audioUrl); nextTopicAck=null; turnCount++; prepareTopicAck(); }
-    else startBridge();                    // Ueberbruecken plays right away -> no dead air during understand
-    const preFillers=[fetchFiller(query,1), fetchFiller(query,2)];   // speculative: Verstehen + fact, in parallel with /understand
-    qEcho.innerHTML='<span>'+tr('qYour')+'</span> <b></b>'; qEcho.querySelector('b').textContent=query;
-    setState('listen'); aEl.className='a working'; aEl.textContent=tr('understanding');
-    setTimeout(()=>setState('think'),500);
-    try{
-      const sentPending=pending;
-      const u=await (await fetch('/understand',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({query,context:{history,lastQuery,lastAnswer,pending:sentPending,slots:slotsDS}})})).json();
-      go.disabled=false; q.disabled=false;
-      if(u.slots) slotsDS={ort:u.slots.ort||slotsDS.ort, indikator:u.slots.indikator||slotsDS.indikator};
-      if(u.precise){ pending=null; deliver(u.best_guess, u.kind==='anschluss'||u.kind==='klarstellung', {continued:true, preFillers:(u.best_guess===query?preFillers:null)}); return; }
-      awaitingAnswer=false; stopFillerLoop();   // a clarify question (not a long answer) is now spoken -> no more bridging
-      pending={clarify:u.clarify||'', best_guess:u.best_guess||'', options:u.options||[], original:query};
-      setState('idle');
-      aEl.className='a'; aEl.textContent=u.clarify||tr('clarify');
-      if(u.clarifyAudioUrl){ const s=slot(); fill(s,u.clarifyAudioUrl); }
-      const items=[]; if(u.best_guess) items.push({label:u.best_guess,best:true,onClick:()=>deliver(u.best_guess,false)});
-      (u.options||[]).forEach(o=>{ if(o&&o!==u.best_guess) items.push({label:o,onClick:()=>deliver(o,false)}); });
-      renderBubbles(items,'<span class="spin"></span>Wahrscheinlichste Antwort wird bereits vorbereitet …','clarify');
-      q.value=''; q.focus();
-    }catch(e){awaitingAnswer=false;stopFillerLoop();go.disabled=false;q.disabled=false;stopWait();aEl.className='a';aEl.textContent=tr('connError')+e.message;setState('done');}
-  }
-
-  // phase 2 - deliver: Ueberbruecken (already playing) -> open-ended filler loop -> Antwort -> Follow-up,
-  // all in order (dialog-fsm.mjs, 2026-09 redesign: the filler loop runs CONCURRENTLY with /answer and
-  // stops issuing new fillers the instant /answer resolves, so it never pads a fast answer).
-  async function deliver(query, isFollowup, opts){
-    opts=opts||{};
-    unlockAudio(); pending=null; followupActive=false;   // a delivered/clicked answer is not a topic pivot
-    awaitingAnswer=true;                                  // fillers bridge until the answer slot is filled
-    go.disabled=true; q.disabled=true;
-    if(!opts.continued){ reset(); newTurn(); startBridge(); }   // fresh turn (bubble click): bridge plays immediately
-    qEcho.innerHTML='<span>'+(isFollowup?tr('qFollow'):tr('qQuestion'))+'</span> <b></b>'; qEcho.querySelector('b').textContent=query;
-    aEl.className='a working'; aEl.textContent=tr('fetching'); setState('query'); startWait();
-    const fillerP=runFillerLoop(query, opts.preFillers);   // runs concurrently; self-stops once awaitingAnswer flips false below
-    try{
-      const d=await (await fetch('/answer',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({query})})).json();
-      stopWait();
-      const okA=d.ok!==false;   // false only when /answer itself failed (e.g. edge overload); a valid no-data answer is still ok:true
-      const ans=okA?(d.answer||tr('noAnswer')):tr('busy');
-      const matched=okA&&(d.meta?(d.meta.has_real_data!==false && !!d.meta.table):true);
-      type(aEl,ans,()=>{
-        if(d.meta){const m=d.meta;src.style.display='flex';
-          if(!matched){src.classList.add('refuse');src.querySelector('.tick').textContent=tr('approx');srcTxt.textContent=tr('approxTxt');}
-          else{src.querySelector('.tick').textContent=tr('groundedLive')+(d.reused?tr('reused'):'');
-            srcTxt.innerHTML='<span class="pill">'+(m.table||'—')+'</span> <span class="pill">'+(m.place_resolved||m.place_name_requested||'')+'</span> <span class="pill">'+(m.live_rows_used||0)+tr('liveRows')+'</span>';}
-        }
-      });
-      awaitingAnswer=false;   // I10: tell the filler loop to stop issuing new fillers
-      await fillerP;          // let it settle its already-in-flight last slot BEFORE the answer is queued, so order holds
-      const sA=slot(); fill(sA, okA?d.audioUrl:null);
-      go.disabled=false; q.disabled=false;
-      if(!okA){ followupActive=false; renderExamples(); setState('done'); return; }   // degrade cleanly on failure: no broken follow-up on a non-answer, offer examples instead of an empty state (finally still runs)
-      lastQuery=query; lastAnswer=ans;
-      history.push({q:query, place:(d.meta&&(d.meta.place_resolved||d.meta.place_name_requested))||null, answer:ans});
-      if(history.length>6) history.shift();
-      const sI=slot(); sI.optional=true;   // follow-up invite is nice-to-have: never bridge it with endless fillers — it plays when ready
-      doFollowup(query, ans).then(u=>fill(sI, u));
-    }catch(e){awaitingAnswer=false;await fillerP.catch(()=>{});stopFillerLoop();stopWait();aEl.className='a';aEl.textContent=tr('connError')+e.message;setState('done');go.disabled=false;q.disabled=false;const sA=slot();fill(sA,null);}
-    finally{ prepareNextIntro(); prepareTopicAck(); }   // I5: refresh next bridge + new-topic ack on EVERY path
-  }
-
-  // follow-up: render bubbles + RETURN the spoken invite url (queued as part 5)
-  async function doFollowup(query, answer){
-    try{
-      const f=await (await fetch('/followup',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({query,answer})})).json();
-      const sug=f.suggestions||[];
-      if(sug.length){
-        // Follow-up is phrased as a yes-question (see deriveInvite); we offer "Ja" plus concrete
-        // alternatives, but deliberately NO "Nein" option — declining just means asking something new,
-        // which the input field always allows. (operator: der Nutzer soll nur mit "ja" antworten können.)
-        // Bug#2 fix: pre-produce the first fillers (Verstehen + fact) for the MOST LIKELY follow-up
-        // NOW, while the caller is still listening to the current answer / deciding -- so a "Ja" plays
-        // them instantly instead of computing the Wikipedia fun fact + TTS reactively at click time.
-        const preFillers0=[fetchFiller(sug[0],1), fetchFiller(sug[0],2)];
-        const items=[
-          // Bug#1 fix: a "Ja" (and every offered follow-up) is a CONTINUATION, not a fresh turn --
-          // pass continued:true so deliver() skips reset()/newTurn()/startBridge(). That means no
-          // replayed bridge intro and no cutting the still-playing invite; the pre-produced preFillers0
-          // feeds the "Ja" path so Verstehen + a fact are ready the instant it's clicked.
-          {label:'✓ Ja',best:true,onClick:()=>deliver(sug[0],true,{continued:true,preFillers:preFillers0})},
-          ...sug.slice(1).map(s=>({label:s,onClick:()=>deliver(s,true,{continued:true})}))
-        ];
-        renderBubbles(items,'💬 '+(f.invite||tr('inviteFallback')),'followup');
-        followupActive=true;   // a follow-up is now on offer -> a typed NEW question triggers the topic-ack
-      } else { renderExamples(); followupActive=false; }
-      return f.inviteAudioUrl||null;
-    }catch(e){ return null; }
-  }
-
+  function ask(){ const query=q.value.trim(); if(!query) return; unlockAudio(); hideWelcome(); dialog.ask(query); }
   go.onclick=ask; q.addEventListener('keydown',e=>{if(e.key==='Enter')ask();});
 
-  // Microphone -> record -> OUR OWN server-side Whisper STT (no browser cloud dependency, works
-  // in any modern browser). Click to start, click again to stop and transcribe.
+  // ---------- microphone -> server-side STT (channel-first, whisper fallback) ----------
   let mediaRec=null,recording=false,recStream=null,recChunks=[],vadTimer=null,vadCtx=null,vadSpoke=false,sttInFlight=false,lastInterim=0,interimSeq=0;
-  // Live partial transcript (operator #1/#3): while recording, re-transcribe the GROWING audio so the
-  // caller sees text appear as they speak. SINGLE-FLIGHT (one /stt at a time) + a ~1.8s floor, so it
-  // self-throttles to whisper's speed and never floods llm2's GPU (design agreed with llm2: 2 concurrent
-  // recordings are free, a floor stops short clips firing every ~0.3s). Best-effort — the authoritative
-  // transcription is still the final full call in onstop. Enable per deploy via CC_STT_LIVE.
   async function interimStt(){
     if(!window.CC_STT_LIVE || !recording || sttInFlight || !recChunks.length) return;
     if(Date.now()-lastInterim < 1800) return;
@@ -614,7 +321,7 @@
     try{
       const blob=new Blob(recChunks,{type:(mediaRec&&mediaRec.mimeType)||'audio/webm'});
       const d=await (await fetch('/stt',{method:'POST',headers:{'content-type':blob.type},body:blob})).json();
-      if(myseq===interimSeq && recording){ const t=(d.text||'').replace(/[\[(][^\])]*[\])]/g,'').trim(); if(t) q.value=t; }  // latest-wins live text
+      if(myseq===interimSeq && recording){ const t=(d.text||'').replace(/[\[(][^\])]*[\])]/g,'').trim(); if(t) q.value=t; }
     }catch(e){}
     finally{ sttInFlight=false; }
   }
@@ -625,49 +332,44 @@
       mediaRec.ondataavailable=e=>{if(e.data&&e.data.size)recChunks.push(e.data);};
       mediaRec.onstop=async ()=>{
         recording=false; mic.classList.remove('on');
-        try{ if(vadTimer){clearInterval(vadTimer);vadTimer=null;} if(vadCtx){vadCtx.close();vadCtx=null;} }catch(e){}   // tear down the VAD auto-stop watcher
+        try{ if(vadTimer){clearInterval(vadTimer);vadTimer=null;} if(vadCtx){vadCtx.close();vadCtx=null;} }catch(e){}
         try{recStream.getTracks().forEach(t=>t.stop());}catch(e){}
         setState('think'); aEl.className='a working'; aEl.textContent=tr('processingRec');
         try{
           const blob=new Blob(recChunks,{type:(mediaRec&&mediaRec.mimeType)||'audio/webm'});
           const d=await (await fetch('/stt',{method:'POST',headers:{'content-type':blob.type},body:blob})).json();
-          const stt=(d.text||'').replace(/[\[(][^\])]*[\])]/g,'').trim();   // strip Whisper non-speech placeholders ([Musik], (Applaus), …) that silence/noise produces
-          if(stt.length>=4 && /[a-zäöüß]/i.test(stt)){ q.value=stt; ask(); }   // real speech -> ask
-          else { aEl.className='a'; aEl.textContent=tr('micUnclear'); setState('idle'); }   // silence/noise/placeholder -> DON'T feed garbage into the state machine
+          const stt=(d.text||'').replace(/[\[(][^\])]*[\])]/g,'').trim();
+          if(stt.length>=4 && /[a-zäöüß]/i.test(stt)){ q.value=stt; ask(); }
+          else { aEl.className='a'; aEl.textContent=tr('micUnclear'); setState('idle'); }
         }catch(e){ aEl.className='a'; aEl.textContent=tr('sttError'); setState('idle'); }
       };
-      mediaRec.start(1000); recording=true; mic.classList.add('on'); setState('listen');   // 1s timeslice: recChunks grows so interimStt can re-transcribe the audio-so-far (harmless when live is off)
+      mediaRec.start(1000); recording=true; mic.classList.add('on'); setState('listen');
       aEl.className='a working'; aEl.textContent=tr('listening');
-      // VAD auto-stop: watch the mic level and stop the recording ~1.4s after the caller stops speaking
-      // (client-side RMS heuristic via Web Audio — no backend change). Manual mic click still stops too.
       try{
         vadCtx=new (window.AudioContext||window.webkitAudioContext)();
-        const src=vadCtx.createMediaStreamSource(recStream), an=vadCtx.createAnalyser(); an.fftSize=512; src.connect(an);
-        const buf=new Uint8Array(an.fftSize); const t0=Date.now(); let silentSince=0; vadSpoke=false;
+        const s=vadCtx.createMediaStreamSource(recStream), an=vadCtx.createAnalyser(); an.fftSize=512; s.connect(an);
+        const buf=new Uint8Array(an.fftSize); const tStart=Date.now(); let silentSince=0; vadSpoke=false;
         vadTimer=setInterval(()=>{
           if(!recording) return;
-          an.getByteTimeDomainData(buf); let s=0; for(let i=0;i<buf.length;i++){const d=(buf[i]-128)/128; s+=d*d;}
-          const rms=Math.sqrt(s/buf.length), now=Date.now();
-          if(rms>0.045){ vadSpoke=true; silentSince=0; }                                                              // speaking
-          else if(vadSpoke){ if(!silentSince) silentSince=now; else if(now-silentSince>1400){ try{mediaRec&&mediaRec.stop();}catch(e){} } }  // 1.4s pause after speech -> auto-stop
-          if(now-t0>20000){ try{mediaRec&&mediaRec.stop();}catch(e){} }                                               // 20s hard cap
-          interimStt();   // live partial transcript (self-gated: CC_STT_LIVE flag + single-flight + 1.8s floor)
+          an.getByteTimeDomainData(buf); let sum=0; for(let i=0;i<buf.length;i++){const d=(buf[i]-128)/128; sum+=d*d;}
+          const rms=Math.sqrt(sum/buf.length), now=Date.now();
+          if(rms>0.045){ vadSpoke=true; silentSince=0; }
+          else if(vadSpoke){ if(!silentSince) silentSince=now; else if(now-silentSince>1400){ try{mediaRec&&mediaRec.stop();}catch(e){} } }
+          if(now-tStart>20000){ try{mediaRec&&mediaRec.stop();}catch(e){} }
+          interimStt();
         },120);
-      }catch(e){}   // VAD is best-effort; without it the manual click still works
+      }catch(e){}
     }catch(err){
       mic.classList.remove('on');
-      const m = err&&err.name==='NotAllowedError' ? tr('micDenied')
-              : err&&err.name==='NotFoundError' ? tr('micNotFound')
-              : tr('micUnavail');
+      const m = err&&err.name==='NotAllowedError' ? tr('micDenied') : err&&err.name==='NotFoundError' ? tr('micNotFound') : tr('micUnavail');
       aEl.className='a'; aEl.textContent=tr('speechInput')+m;
     }
   }
   if(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder){
-    mic.onclick=()=>{ if(recording){ try{mediaRec&&mediaRec.stop();}catch(e){} } else { stopAll(); startRec(); } };
+    mic.onclick=()=>{ if(recording){ try{mediaRec&&mediaRec.stop();}catch(e){} } else { unlockAudio(); startRec(); } };
   } else { mic.disabled=true; mic.title=tr('micUnsupported'); }
-  // i18n: apply the persisted language to all chrome, wire the DE/EN toggle, and expose t() to the
-  // separate mobile-toggle script below.
-  try{ window.ccT=tr; window.ccLang=()=>lang; }catch(e){}
+
+  try{ window.ccT=tr; window.ccLang=()=>lang; window.ccDialog=dialog; window.ccPlayer=speech; }catch(e){}
   applyStatic();
   { const lt=document.getElementById('langToggle'); if(lt) lt.onclick=()=>setLang(lang==='de'?'en':'de'); }
 })();

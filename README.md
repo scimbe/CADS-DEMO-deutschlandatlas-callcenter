@@ -50,6 +50,19 @@ a public, unauthenticated Esri ArcGIS Feature Service.
 | `scripts/setup_whisper_cpp.sh` | Clones + builds `whisper.cpp` (pinned tag) into `vendor/`, downloads a multilingual ggml model. |
 | `scripts/n8n_workflow_runtime.mjs` | Runs the workflow's real `jsCode` (extracted verbatim from `n8n/callcenter-workflow.json`) outside of n8n, following the real `if`-node branches and making real live calls (ArcGIS + litellm-proxy) — see [Integration & end-to-end verification](#integration--end-to-end-verification). |
 | `scripts/run_callcenter_pipeline.py` | The STT → workflow → TTS glue script — the actual end-to-end entry point for this demo. |
+| `gui/` | The interactive voice call-center GUI + backend: `dialog-fsm.mjs` (the dialogue design, shared by server and browser), `dialog-client.mjs` (one ordered player + turn runner), `server.mjs` (routes), `lib/` (limiter, tts, stt, llm, pipeline, bridging). See [`gui/README.md`](gui/README.md). |
+| `tests/gui/` | Node tests for the dialogue policy/player/bridging (`node --test 'tests/gui/*.test.mjs'`) and a Playwright browser smoke test against the stub server. |
+| `scripts/sync_n8n_fsm_notes.mjs` | Refreshes the n8n workflow's "SM:" sticky notes from `gui/dialog-fsm.mjs` so the mirror stays honest. |
+
+## The spoken dialogue (2026-09 consolidation)
+
+The GUI turns the pipeline into a continuous conversation: one ordered voice stream, the Atlas
+answer as the foreground (it takes priority the instant it is ready, but never cuts a clip that is
+already playing), every wait bridged from prepared material — pools warmed at boot plus
+"Wussten Sie schon" facts produced in the background after each answer for the next round — and a
+few short dynamic parts (the "Verstanden" echo, the answer, the follow-up invite). The design, its
+invariants and the tests are documented in [`gui/README.md`](gui/README.md); `GET /fsm` on a running
+instance returns the same design as JSON.
 
 ## Regenerating the catalog
 

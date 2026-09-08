@@ -88,12 +88,9 @@ COPY --from=build /opt/piper   /opt/piper
 COPY --from=build /opt/voices  /app/voices
 RUN chmod +x /opt/whisper-cli-bin/whisper-cli /opt/piper/piper
 
-# app code is COPY'd as root but the process runs as `node` below -- gui/ (and its
-# runtime-created fillers/ dir, see ensureFillers() in server.mjs) must be writable by
-# that user or filler synthesis silently no-ops (mkdirSync EACCES, swallowed by the
-# function's own catch-all). Caught by actually letting a fresh container run past
-# startup and checking /app/gui/fillers was ever created, not just that ensureFillers()
-# didn't throw.
+# app code is COPY'd as root but the process runs as `node` below; prepared clips and caches live
+# under the OS temp dir (gui/lib/tts.mjs, gui/lib/pipeline.mjs), so /app itself only needs to be
+# readable — chown keeps the image robust to any future in-tree write.
 RUN chown -R node:node /app
 
 # non-secret defaults; secrets come from --env-file at run time (see deploy/.env.template).
