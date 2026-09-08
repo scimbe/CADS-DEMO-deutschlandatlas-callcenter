@@ -8,6 +8,7 @@ import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
+import { channelFor, channelCommand } from './channel.mjs';
 
 let sttSeq = 0;
 function run(cmd, args) {
@@ -57,15 +58,21 @@ async function hostSttBlob(wav, publicBase) {
 }
 function evictSttBlob(id) { const p = sttBlobs.get(id); if (p) { sttBlobs.delete(id); rm(p, { force: true }).catch(() => {}); } }
 
-function sttChannel(audioUrl, lang = 'de') {
+// One speech_to_text call. Default: over the HELD channel process (persistent call mode, see
+// channel.mjs) — the ~5.5 s join+pair+Noise cost per call is paid once per process life, not per
+// dictation. CC_CHANNEL_MODE=oneshot keeps the old spawn-per-call path (pre-0.5.0 ct-agent hosts).
+async function sttChannel(audioUrl, lang = 'de') {
+  if ((process.env.CC_CHANNEL_MODE || 'persistent') !== 'oneshot') {
+    const t = await channelFor('speech_to_text', 2).call({ audio_url: audioUrl, lang });
+    const out = (t || '').replace(/\s+/g, ' ').trim();
+    return out && !/^ERROR:/i.test(out) ? out : null;
+  }
+  return sttChannelOneShot(audioUrl, lang);
+}
+function sttChannelOneShot(audioUrl, lang = 'de') {
   return new Promise((resolve) => {
     const payload = JSON.stringify({ audio_url: audioUrl, lang });
-    const p = spawn('bash', ['-c',
-      `set -a; source "$CT_RELAY_ENV"; set +a; printf '%s' '${payload.replace(/'/g, "'\\''")}' | ` +
-      `CT_CHANNEL_ROLE=initiate CT_CHANNEL_CALL_SERVICE=speech_to_text CT_CHANNEL_CALL_PERSISTENT=${process.env.CC_CALL_PERSISTENT || '0'} CT_CHANNEL_RELAY_ONLY=1 ` +
-      `CT_CHANNEL_ID="${process.env.CT_AUDIO_CHANNEL_ID}" CT_CHANNEL_GRANT="$CT_CHANNEL_GRANT_2E" CT_CHANNEL_HOLDER_KEY="$CT_CHANNEL_HOLDER_KEY" CT_CHANNEL_NOISE_KEY="$CT_CHANNEL_NOISE_KEY" ` +
-      `CT_CHANNEL_FRONT_DOOR=bunsenbrenner.org:443 CT_CHANNEL_FRONT_DOOR_CERT="$CT_CHANNEL_FRONT_DOOR_CERT" CT_CHANNEL_FRONT_DOOR_ONLY=1 ` +
-      `CT_CHANNEL_BROKER=bunsenbrenner.org:4435 CT_CHANNEL_RELAY=bunsenbrenner.org:4436 "$CT_AGENT_BIN" channel 2>/dev/null`],
+    const p = spawn('bash', ['-c', `printf '%s' '${payload.replace(/'/g, "'\\''")}' | ` + channelCommand('speech_to_text', { persistent: false })],
       { env: process.env, detached: true });
     let out = '', done = false;
     const finish = (t) => { if (done) return; done = true; clearTimeout(timer); try { process.kill(-p.pid, 'SIGKILL'); } catch {} resolve(t); };
