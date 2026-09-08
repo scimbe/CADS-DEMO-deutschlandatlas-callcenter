@@ -1,0 +1,93 @@
+// Speech-to-text: CHANNEL-FIRST (the llm2 `speech_to_text` channel, CC_STT_CHANNEL=1) with local
+// whisper.cpp as the runtime fallback (CC_WHISPER_MODEL / CC_WHISPER_CLI). The channel takes an
+// https audio_url, so the mic audio is normalized to 16 kHz mono, hosted briefly under our own
+// origin (/stt-blob/<id>.wav), handed over, then evicted.
+import { spawn } from 'node:child_process';
+import { readFile, writeFile, rm } from 'node:fs/promises';
+import { mkdirSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { randomUUID } from 'node:crypto';
+
+let sttSeq = 0;
+function run(cmd, args) {
+  return new Promise((resolve) => {
+    const p = spawn(cmd, args); let out = '', err = '';
+    p.stdout.on('data', (d) => (out += d)); p.stderr.on('data', (d) => (err += d));
+    p.on('close', (code) => resolve({ code, out, err })); p.on('error', () => resolve({ code: -1, out, err }));
+  });
+}
+async function toWav16k(buf) {
+  const base = join(tmpdir(), 'cc-stt-' + process.pid + '-' + (sttSeq++));
+  const inp = base + '.in', wav = base + '.wav';
+  try {
+    await writeFile(inp, buf);
+    if ((await run('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-i', inp, '-ar', '16000', '-ac', '1', wav, '-y'])).code !== 0) return null;
+    return await readFile(wav);
+  } catch { return null; }
+  finally { rm(inp, { force: true }).catch(() => {}); rm(wav, { force: true }).catch(() => {}); }
+}
+
+async function transcribeLocal(buf) {
+  const model = process.env.CC_WHISPER_MODEL, cli = process.env.CC_WHISPER_CLI || 'whisper-cli';
+  if (!model || !buf || !buf.length) return '';
+  const wav16 = await toWav16k(buf);
+  if (!wav16) return '';
+  const wav = join(tmpdir(), 'cc-stt-' + process.pid + '-' + (sttSeq++) + '.wav');
+  try {
+    await writeFile(wav, wav16);
+    const w = await run(cli, ['-m', model, '-l', 'de', '-nt', '-f', wav]);
+    return (w.out || '').replace(/\[[0-9:.\s>\-]+\]/g, '').replace(/\s+/g, ' ').trim();
+  } catch { return ''; }
+  finally { rm(wav, { force: true }).catch(() => {}); }
+}
+
+const STT_BLOB_DIR = join(tmpdir(), 'cc-stt-blob');
+try { mkdirSync(STT_BLOB_DIR, { recursive: true }); } catch {}
+const sttBlobs = new Map();  // id -> local wav path
+export function sttBlobPath(id) { return sttBlobs.get(id) || null; }
+async function hostSttBlob(wav, publicBase) {
+  const id = randomUUID().replace(/-/g, '');
+  const p = join(STT_BLOB_DIR, id + '.wav');
+  await writeFile(p, wav);
+  sttBlobs.set(id, p);
+  const t = setTimeout(() => { sttBlobs.delete(id); rm(p, { force: true }).catch(() => {}); }, 60000);
+  if (t.unref) t.unref();
+  return { id, url: publicBase.replace(/\/$/, '') + '/stt-blob/' + id + '.wav' };
+}
+function evictSttBlob(id) { const p = sttBlobs.get(id); if (p) { sttBlobs.delete(id); rm(p, { force: true }).catch(() => {}); } }
+
+function sttChannel(audioUrl, lang = 'de') {
+  return new Promise((resolve) => {
+    const payload = JSON.stringify({ audio_url: audioUrl, lang });
+    const p = spawn('bash', ['-c',
+      `set -a; source "$CT_RELAY_ENV"; set +a; printf '%s' '${payload.replace(/'/g, "'\\''")}' | ` +
+      `CT_CHANNEL_ROLE=initiate CT_CHANNEL_CALL_SERVICE=speech_to_text CT_CHANNEL_CALL_PERSISTENT=${process.env.CC_CALL_PERSISTENT || '0'} CT_CHANNEL_RELAY_ONLY=1 ` +
+      `CT_CHANNEL_ID="${process.env.CT_AUDIO_CHANNEL_ID}" CT_CHANNEL_GRANT="$CT_CHANNEL_GRANT_2E" CT_CHANNEL_HOLDER_KEY="$CT_CHANNEL_HOLDER_KEY" CT_CHANNEL_NOISE_KEY="$CT_CHANNEL_NOISE_KEY" ` +
+      `CT_CHANNEL_FRONT_DOOR=bunsenbrenner.org:443 CT_CHANNEL_FRONT_DOOR_CERT="$CT_CHANNEL_FRONT_DOOR_CERT" CT_CHANNEL_FRONT_DOOR_ONLY=1 ` +
+      `CT_CHANNEL_BROKER=bunsenbrenner.org:4435 CT_CHANNEL_RELAY=bunsenbrenner.org:4436 "$CT_AGENT_BIN" channel 2>/dev/null`],
+      { env: process.env, detached: true });
+    let out = '', done = false;
+    const finish = (t) => { if (done) return; done = true; clearTimeout(timer); try { process.kill(-p.pid, 'SIGKILL'); } catch {} resolve(t); };
+    const timer = setTimeout(() => finish(null), Number(process.env.CC_CHANNEL_TIMEOUT_MS) || 30000);
+    p.stdout.on('data', (d) => (out += d));
+    p.on('close', () => { const t = (out || '').replace(/\s+/g, ' ').trim(); finish(t && !/^ERROR:/i.test(t) ? t : null); });
+    p.on('error', () => finish(null));
+  });
+}
+
+/** Transcribe caller audio (any ffmpeg-readable format). publicBase = origin llm2 can fetch from. */
+export async function transcribe(buf, publicBase) {
+  if (!buf || !buf.length) return '';
+  const channelReady = process.env.CC_STT_CHANNEL === '1' && process.env.CT_AGENT_BIN && process.env.CT_RELAY_ENV && process.env.CT_AUDIO_CHANNEL_ID && publicBase;
+  if (channelReady) {
+    const wav = await toWav16k(buf);
+    if (wav) {
+      let id = null;
+      try { const h = await hostSttBlob(wav, publicBase); id = h.id; const t = await sttChannel(h.url, 'de'); if (t) return t; }
+      catch {}
+      finally { if (id) evictSttBlob(id); }
+    }
+  }
+  return transcribeLocal(buf);
+}

@@ -1,136 +1,172 @@
 // ============================================================================
 //  Deutschlandatlas Sprach-Callcenter — Dialog State Machine (single source of truth)
 // ----------------------------------------------------------------------------
-//  The whole call-center dialogue is ONE explicit finite-state machine. Every
-//  state declares three hooks — pre / enter / leave — exactly as classic UML
-//  state semantics:
+//  This module is the ONE place the dialogue design lives. It is imported by
+//  gui/server.mjs (route policy, GET /fsm) AND by the browser (gui/dialog-client.mjs
+//  imports it from /dialog-fsm.mjs), so server and client can never disagree on
+//  who speaks what, when, and what may be dropped. It is pure data + pure functions:
+//  no I/O, no timers, no DOM — fully unit-testable (tests/gui/dialog-fsm.test.mjs).
 //
-//     pre    : precompute / prefetch everything the state will need. Runs BEFORE
-//              the state is entered and may fire speculatively, in parallel, so
-//              the enter action never has to wait ("Zeit überbrücken").
-//     enter  : the caller-facing action of the state (what Thorsten says / shows).
-//     leave  : commit the outcome into the carried dialogue context and prepare
-//              the NEXT turn. leave ALWAYS runs — success or failure — so the
-//              machine can never regress (this is what stops the "service intro
-//              repeats" / "fun-fact disappears" regressions from recurring).
-//
-//  DELIVER is an ordered, non-interruptible sequence with an OPEN-ENDED middle
-//  (2026-09 redesign — the previous version had a fixed 5-part sequence; the
-//  operator's actual mental model is simpler and doesn't pad a fast answer with
-//  parts nobody asked for):
-//
-//     P1 BRIDGE          spoken FIRST, right on utterance, to bridge time until
-//                         the Atlas answer is ready. First turn of a session →
-//                         a service introduction (mentions Bunsenbrenner); every
-//                         later turn → a short, unobtrusive transition
-//                         referencing the previous interaction. Decided by
-//                         turnCount, NEVER by whether the last answer succeeded.
-//     P.FILLER (0..N)    an OPEN-ENDED loop, one clip at a time: slot 1 is a
-//                         short "Verstanden: …" echo of the question; slot 2 is
-//                         a REAL, place-linked Wikipedia fact (never invented,
-//                         never a generic stand-in — see I4); slot 3+ is a
-//                         generic "still looking it up" phrase, rotating. Each
-//                         next filler is requested only once the answer is
-//                         STILL not ready by the time the previous one starts
-//                         playing — a fast answer may see zero, one, or two of
-//                         these, never padding. The loop stops issuing NEW
-//                         requests the instant the real answer is ready; the
-//                         filler already playing/queued still finishes (I1).
-//     P.ANTWORT          the grounded, live Deutschlandatlas answer.
-//     P.WEITERFUEHRUNG   an active, varied lead-in that guides the caller
-//                         onward to the next answerable question (yes/no-free:
-//                         only "yes" or a concrete alternative, see I9).
-//
-//  This module is imported by gui/server.mjs (it drives the deterministic
-//  bridge decision and is exposed read-only at GET /fsm) and is mirrored 1:1 by
-//  the n8n workflow (n8n/callcenter-workflow.json → "Dialog State Machine"
-//  sticky + Route by Dialog State), so the design lives in exactly one place.
+//  Operator intent (scimbe, 2026-09-08), restated as the design goal:
+//    * a NATURAL dialogue: one voice, one ordered stream of speech, no dead air,
+//      no overlapping clips, no robotic fixed padding;
+//    * the ATLAS ANSWER is the foreground: it has priority the moment it is ready —
+//      but it never interrupts a clip that is already being spoken;
+//    * "Wussten Sie schon" is ONLY a bridging device, and it is PRODUCED AFTER an
+//      answer for the NEXT round (never fetched live while the caller is waiting);
+//    * every wait is bridged from PREPARED material (pools warmed at boot, facts
+//      produced in the background) plus a few short DYNAMIC parts (the "Verstanden"
+//      echo, the answer, the follow-up invite), so the flow stays continuous.
 // ============================================================================
 
-/** The named spoken parts of a delivered turn. FILLER is emitted 0..N times
- *  (open-ended, see DELIVER below) between BRIDGE and ANTWORT — it is not a
- *  single fixed slot the way the others are. */
-export const PARTS = ['BRIDGE', 'FILLER', 'ANTWORT', 'WEITERFUEHRUNG'];
+/** The named spoken parts. Each belongs to a CLASS that decides its fate when the
+ *  Atlas answer becomes ready (see INVARIANTS I1/I2). */
+export const PART = {
+  GREETING: 'greeting',     // first gesture of the session
+  OPENER: 'opener',         // first thing said on an utterance (bridges the understand phase)
+  VERSTEHEN: 'verstehen',   // "Verstanden, Sie möchten wissen: …" echo of the RESOLVED question
+  FACT: 'fact',             // "Wussten Sie schon …" — prepared in a PREVIOUS round (N1) or generic (F1)
+  GAP: 'gap',               // "Einen Moment, ich sehe nach …" — prepared pool, repeats while waiting
+  CLARIFY: 'clarify',       // one targeted clarifying question (replaces the answer this turn)
+  ANSWER: 'answer',         // the grounded, live Deutschlandatlas answer
+  INVITE: 'invite',         // active lead-in to the next answerable question
+};
 
-/** The content kind of one FILLER instance, in the order they're tried. */
-export const FILLER_KIND = { VERSTEHEN: 'verstehen', FUNFACT: 'funfact', GENERIC: 'generic' };
+/** hard = must be spoken to the end and is never dropped once queued;
+ *  soft = bridging only: dropped if the Atlas answer is ready before it started. */
+export const CLASS = { HARD: 'hard', SOFT: 'soft' };
+export const PART_CLASS = {
+  [PART.GREETING]: CLASS.HARD,
+  [PART.OPENER]: CLASS.SOFT,
+  [PART.VERSTEHEN]: CLASS.SOFT,
+  [PART.FACT]: CLASS.SOFT,
+  [PART.GAP]: CLASS.SOFT,
+  [PART.CLARIFY]: CLASS.HARD,
+  [PART.ANSWER]: CLASS.HARD,
+  [PART.INVITE]: CLASS.HARD,
+};
+export const isSoft = (part) => PART_CLASS[part] === CLASS.SOFT;
 
-/** Turn kinds produced by the CLASSIFY state (mirrors the n8n "Route by Dialog State"). */
+/** The kinds of OPENER, chosen deterministically at utterance time (I3). */
+export const OPENER_KIND = {
+  SERVICE_INTRO: 'service_intro',   // turn 0: welcome + one helpful fact about the service
+  TOPIC_ACK: 'topic_ack',           // a NEW topic typed while a follow-up was on offer
+  CONTINUATION: 'continuation',     // the caller took the offered follow-up ("Ja" / a suggestion)
+  CONTEXT_BRIDGE: 'context_bridge', // any later turn: short link from the previous question onward
+};
+
+/** Bridging kinds the client may request from POST /bridge, in their natural order. */
+export const BRIDGE_KIND = { VERSTEHEN: PART.VERSTEHEN, FACT: PART.FACT, GAP: PART.GAP };
+
+/** Turn kinds produced by the CLASSIFY state. */
 export const KIND = { NEU: 'neu', ANSCHLUSS: 'anschluss', KLARSTELLUNG: 'klarstellung' };
 
 /**
- * The state machine, declared data-first so it is inspectable and testable.
- * Each state: { pre, enter, leave, on } where `on` maps an event to the next state.
+ * Deterministic opener decision (invariant I3). `turnCount` = turns already
+ * DELIVERED this session; `pivot` = a new question was typed while a follow-up
+ * was on offer; `continued` = the caller accepted the offered follow-up.
+ * Never keyed on whether the last answer succeeded.
+ */
+export function openerKind({ turnCount = 0, pivot = false, continued = false } = {}) {
+  if (continued) return OPENER_KIND.CONTINUATION;
+  if ((Number(turnCount) || 0) === 0) return OPENER_KIND.SERVICE_INTRO;
+  if (pivot) return OPENER_KIND.TOPIC_ACK;
+  return OPENER_KIND.CONTEXT_BRIDGE;
+}
+
+/**
+ * Which bridging part to request next while the answer is still pending.
+ * `state` is the per-turn bridging progress: { understood, verstehenDone, factDone }.
+ *   - the VERSTEHEN echo comes first, but only once the question is understood
+ *     (it echoes the RESOLVED question, so it can never be stale);
+ *   - the FACT comes after verstehen (or, if understanding is slow, after one gap);
+ *   - everything else is a GAP, repeated for as long as the wait lasts.
+ * Returns the next kind; the caller mutates `state` when a part was actually used.
+ */
+export function nextBridgeKind(state = {}) {
+  const { understood = false, verstehenDone = false, factDone = false, gaps = 0 } = state;
+  if (understood && !verstehenDone) return BRIDGE_KIND.VERSTEHEN;
+  if (!factDone && (verstehenDone || gaps >= 1)) return BRIDGE_KIND.FACT;
+  return BRIDGE_KIND.GAP;
+}
+
+/** Mark a bridging kind as used in the per-turn bridging state (pure helper). */
+export function markBridgeUsed(state, kind) {
+  const s = { understood: false, verstehenDone: false, factDone: false, gaps: 0, ...state };
+  if (kind === BRIDGE_KIND.VERSTEHEN) s.verstehenDone = true;
+  else if (kind === BRIDGE_KIND.FACT) s.factDone = true;
+  else if (kind === BRIDGE_KIND.GAP) s.gaps += 1;
+  return s;
+}
+
+/**
+ * Playback decision when a HARD part becomes ready (invariant I2): every queued
+ * part that is SOFT and has not started yet is dropped; the currently playing
+ * clip (if any) always finishes. Pure: takes the queue, returns the new queue.
+ * Items: { part, started:boolean, played:boolean }.
+ */
+export function dropPendingSoft(queue) {
+  return queue.filter((it) => !(isSoft(it.part) && !it.started && !it.played));
+}
+
+/**
+ * The state machine, declared data-first so it is inspectable (GET /fsm) and testable.
+ * Each state: { pre, enter, leave, on } — pre = prepare/prefetch, enter = the
+ * caller-facing action, leave = commit + prepare the NEXT turn (leave ALWAYS runs).
  */
 export const FSM = {
   initial: 'GREETING',
   states: {
     GREETING: {
-      pre: 'prefetch a short spoken greeting (/greeting) AND the turn-0 bridge (/intro) up front',
-      enter: 'browsers block autoplay on bare load, so on the caller\'s FIRST gesture (click/tap, not the ask button) play the greeting and fade the welcome hint',
-      leave: 'mark greeted; a submitted question also counts as greeted (the turn-0 intro is then the opener)',
+      pre: 'POST /session once: greeting + turn-0 opener + topic-ack from the prepared pools; N1 facts for the example places start producing in the background',
+      enter: 'on the caller\'s FIRST gesture (autoplay policy) speak the greeting and fade the welcome hint',
+      leave: 'greeted; a submitted question also counts as greeted (the turn-0 opener is then the first thing heard)',
       on: { greeted: 'IDLE', utterance: 'CLASSIFY' },
     },
     IDLE: {
-      pre: 'prepare, ready-to-play: the next BRIDGE (/intro) AND a "new topic" ack (/topicack)',
+      pre: 'the next opener (context bridge for the last question, or topic-ack/continuation) is already prepared',
       enter: 'await caller utterance',
       leave: 'none',
       on: { utterance: 'CLASSIFY' },
     },
     CLASSIFY: {
-      pre: 'carry {history, lastQuery, lastAnswer, pending, slots, followupActive} into the request',
-      enter: 'POST /understand → { precise, kind∈{neu,anschluss,klarstellung}, slots, clarify, best_guess }',
-      leave: 'merge dialogue-state slots',
+      pre: 'speak the prepared OPENER immediately (t=0); start bridging with GAP/FACT while /understand runs',
+      enter: 'POST /understand {query, context} → {precise, kind, slots, clarify, best_guess, options}; the Atlas pipeline is already speculating on the raw query',
+      leave: 'merge slots; request the VERSTEHEN echo for the resolved question',
       on: { precise: 'DELIVER', ambiguous: 'CLARIFY' },
     },
     CLARIFY: {
-      pre: 'synthesize the targeted clarify question audio',
-      enter: 'speak ONE targeted clarify question; offer best_guess + options as one-click bubbles',
-      leave: 'set `pending` so the NEXT utterance is treated as the answer to this question (kind=klarstellung)',
+      pre: 'the clarify question is synthesized by /understand itself',
+      enter: 'drop pending soft parts; speak ONE targeted clarify question (hard); offer best_guess + options as bubbles',
+      leave: 'set `pending` so the next utterance is resolved AGAINST this question (kind=klarstellung)',
       on: { answered: 'DELIVER', restated: 'CLASSIFY' },
     },
     DELIVER: {
-      pre: 'POST /answer (pipeline, retry-guarded) fires immediately; concurrently, an open-ended FILLER loop calls POST /filler one clip at a time (n=1 Verstehen, n=2 Wikipedia fact, n=3+ generic) for as long as /answer has not yet resolved',
-      enter: 'play BRIDGE, then the FILLER loop\'s clips as they arrive (0..N of them, strictly in order, each finishing before the next), then ANTWORT, then WEITERFUEHRUNG — never interrupted, never padded beyond what the wait actually needed',
-      leave: 'commit {lastQuery, lastAnswer, slots, history}; turnCount++; ALWAYS prepare the next BRIDGE and topic-ack',
+      pre: 'POST /answer (priority) runs; the bridge loop keeps ONE prepared part queued: verstehen → fact → gap…',
+      enter: 'when the answer is ready: drop pending soft parts, speak ANSWER right after the current clip; then INVITE if it is ready within the grace window',
+      leave: 'commit {lastQuery, slots, history}; turnCount++; prepare the next opener; produce N1 facts for the likely next places (background, low priority)',
       on: { done: 'IDLE' },
-      parts: PARTS,
-      // P1 BRIDGE has three variants, chosen deterministically at turn start:
-      //   turn 0        -> a service intro that ALSO conveys one helpful Bunsenbrenner fact (#2)
-      //   topic pivot   -> a "that is also an interesting question" ack, when the caller typed a NEW
-      //                    topic instead of the offered follow-up (#5); pre-synthesized, plays instantly
-      //   otherwise     -> a short context bridge that references the previous interaction
-      // WEITERFUEHRUNG offers only "Ja" + concrete alternatives, never a "Nein" (#4).
     },
   },
 };
 
-/** Hard invariants the implementation must uphold. */
+/** Hard invariants the implementation upholds (tests assert the pure ones). */
 export const INVARIANTS = [
-  'I1 ordered/non-interruptible: BRIDGE, then each FILLER as it arrives, then ANTWORT, then WEITERFUEHRUNG always play in queue order, each to the end',
-  'I2 bridge-first: P1 (BRIDGE) enters immediately on utterance, before /understand resolves',
-  'I3 bridge identity is deterministic at turn start: turn 0 -> service intro + Bunsenbrenner fact; topic pivot -> topic-ack; else a short context bridge — NEVER keyed on last-answer success',
-  'I4 a FILLER of kind funfact, if it plays at all, is ALWAYS a real, place-linked Wikipedia fact (shown; spoken per toggle) — never a generic stand-in phrase; it is not guaranteed to occur (only requested if the answer is still pending when its turn in the loop comes up)',
-  'I5 the next BRIDGE and topic-ack are prepared in EVERY leave (success AND failure), so nothing can regress to the intro',
-  'I6 the Atlas answer + all LLM calls retry transient proxy resets (ECONNRESET/5xx)',
-  'I7 greeting plays on the FIRST caller gesture (autoplay policy), pre-synthesized, distinct from the turn-0 intro so they never repeat',
-  'I8 topic pivot: a NEW topic asked instead of the offered follow-up opens with the pre-synthesized "also interesting" ack in place of the bridge',
-  'I9 the follow-up (P5) offers only "Ja" + alternatives, never a "Nein" — declining means asking something new',
-  'I10 the FILLER loop stops requesting NEW clips the instant the real answer is ready; whatever filler is already playing/queued still finishes (never cut off), but no additional filler is added after that point — a fast answer sees fewer (or zero) fillers, never padding',
+  'I1 ONE ordered player: parts are spoken strictly in queue order; a clip that is playing is never interrupted or cut',
+  'I2 the Atlas answer has priority: the moment it is ready, every SOFT part not yet started is dropped and the answer plays right after the current clip',
+  'I3 the opener is prepared material and plays at t=0 on utterance; its kind is openerKind(turnCount, pivot, continued) — never keyed on last-answer success',
+  'I4 "Wussten Sie schon" is never fetched live during a wait: it is an N1 fact produced after a PREVIOUS answer, or an F1 pool clip; a wait with nothing prepared just gets a GAP',
+  'I5 bridging parts are requested one at a time (lookahead 1) and are all prepared, except the short VERSTEHEN echo which is skipped if it is not ready in time',
+  'I6 after EVERY answer (success or failure) the next opener and N1 facts for the likely next places are prepared in the background at low priority',
+  'I7 the greeting plays on the first caller gesture, from the pool, and is distinct from the turn-0 service intro',
+  'I8 the invite offers only "Ja" + concrete, validated alternatives (never a "Nein"); it is spoken after the answer only if ready within the grace window, else offered silently as bubbles',
+  'I9 answer TTS is high priority; all bridging TTS is low priority; every LLM/pipeline/TTS call retries transient failures',
+  'I10 every spoken string passes the same sanitizer (IPA, gender notation) exactly once, inside ttsSpeak',
 ];
 
-/**
- * THE deterministic bridge decision (invariant I3). Both the server and the
- * client agree on this rule. `turnCount` is the number of turns already
- * DELIVERED in this session (0 on the very first turn).
- */
-export function bridgeKind(turnCount) {
-  return (Number(turnCount) || 0) === 0 ? 'service_intro' : 'context_bridge';
-}
-
-/** A compact, serializable view of the machine for GET /fsm and for the n8n mirror. */
+/** A compact, serializable view for GET /fsm and the n8n mirror. */
 export function describe() {
-  return { parts: PARTS, kinds: KIND, fillerKinds: FILLER_KIND, fsm: FSM, invariants: INVARIANTS };
+  return { parts: PART, partClass: PART_CLASS, openerKinds: OPENER_KIND, bridgeKinds: BRIDGE_KIND, kinds: KIND, fsm: FSM, invariants: INVARIANTS };
 }
 
-export default { PARTS, KIND, FILLER_KIND, FSM, INVARIANTS, bridgeKind, describe };
+export default { PART, CLASS, PART_CLASS, isSoft, OPENER_KIND, BRIDGE_KIND, KIND, openerKind, nextBridgeKind, markBridgeUsed, dropPendingSoft, FSM, INVARIANTS, describe };

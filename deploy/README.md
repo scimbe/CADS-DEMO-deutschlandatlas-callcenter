@@ -49,7 +49,9 @@ Then front `:8791` with your tunnel / the `callcenter-<hash>.bunsenbrenner.org` 
   `answer` + `meta.table` + an `audioUrl` of the form `/tts/<id>.wav` (proves LLM pipeline + local Piper).
 - `GET` that `/tts/<id>.wav` returns `audio/wav` (proves TTS serving).
 - Mic → `/stt` returns a German transcript (proves whisper-cli + model).
-- `POST /context {"query":"…in Hannover?"}` returns a fast, IPA-free spoken blurb (`/tts/<id>.wav`).
+- `GET /health` shows every bridging pool warm (`pools.gap` etc. > 0) and, after a first answer,
+  `facts.prepared` ≥ 1 (the "Wussten Sie schon" for the next round was produced in the background).
+- `POST /bridge {"kind":"fact","query":"…in Kiel?"}` returns a prepared clip instantly (`/tts/<id>.wav`).
 
 ## Env
 
