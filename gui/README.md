@@ -90,11 +90,14 @@ gui/lib/bridging.mjs    pools, N1 fact store, openers, verstehen echo, invite te
 ## Tests
 ```
 node --test 'tests/gui/*.test.mjs'                      # policy, player/dialog (fake audio + API), bridging (stub)
-CC_STUB=1 CC_TTS_STUB=1 CC_STUB_ANSWER_MS=9000 PORT=8799 node gui/server.mjs &
+CC_STUB=1 CC_TTS_STUB=1 CC_STUB_ANSWER_MS=16000 PORT=8799 node gui/server.mjs &
 NODE_PATH=<dir with node_modules/playwright> node tests/gui/smoke.playwright.mjs http://127.0.0.1:8799
 ```
 The browser smoke test drives three turns (question → "✓ Ja" → new topic) in headless Chromium and
-asserts the invariants on the real `#player` event timeline. After changing the FSM run
+asserts the invariants on the real `#player` event timeline. Use a long stub answer (≥ 16 s) so the
+wait outlasts opener + verstehen and the prepared-fact path is actually exercised; with a fast
+answer the fact is (correctly) never reached. The reuse cache under the OS temp dir (`cc-qcache`)
+makes repeated queries instant — clear it to re-test the slow path. After changing the FSM run
 `node scripts/sync_n8n_fsm_notes.mjs` to refresh the n8n workflow's mirror notes.
 
 ## Multi-user / operations

@@ -121,12 +121,16 @@ export function answerFor(query, priority = false, userKey = 'anon') {
   return promise;
 }
 
-/** Keep only the suggestions the pipeline can actually answer with real data, within a budget. */
+/** Keep only the suggestions the pipeline can actually answer with real data. Returns as soon as
+ *  `want` are confirmed, when every check settled, or when the budget is used up. */
 export async function validateSuggestions(suggestions, want = 3, timeoutMs = 8000, userKey = 'anon') {
   if (!suggestions.length) return [];
   const good = [];
-  const checks = suggestions.map((s) => answerFor(s, false, userKey).then((r) => { if (hasRealData(r)) good.push(s); }).catch(() => {}));
-  await Promise.race([Promise.all(checks), sleep(timeoutMs)]);
+  let settled = 0, enough;
+  const enoughP = new Promise((res) => { enough = res; });
+  const checks = suggestions.map((s) => answerFor(s, false, userKey).then((r) => { if (hasRealData(r)) good.push(s); }).catch(() => {})
+    .finally(() => { settled++; if (good.length >= want || settled === suggestions.length) enough(); }));
+  await Promise.race([Promise.all(checks), enoughP, sleep(timeoutMs)]);
   return good.slice(0, want);
 }
 

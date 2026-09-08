@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Browser smoke test of the whole dialogue against a running server (normally in stub mode):
 //
-//   CC_STUB=1 CC_TTS_STUB=1 CC_STUB_ANSWER_MS=9000 PORT=8799 node gui/server.mjs &
+//   CC_STUB=1 CC_TTS_STUB=1 CC_STUB_ANSWER_MS=16000 PORT=8799 node gui/server.mjs &
 //   NODE_PATH=<dir containing node_modules/playwright> node tests/gui/smoke.playwright.mjs http://127.0.0.1:8799
 //
 // It drives three turns (typed question → "✓ Ja" follow-up → a new topic), records every
@@ -26,7 +26,7 @@ await page.addInitScript(() => {
   });
 });
 page.on('request', (r) => { const u = new URL(r.url()); if (/^\/(session|opener|understand|bridge|answer|followup)$/.test(u.pathname)) reqs.push({ t: Date.now(), path: u.pathname, body: r.postDataJSON && r.postDataJSON() }); });
-page.on('response', async (r) => { const u = new URL(r.url()); if (/^\/(bridge|answer|understand|opener)$/.test(u.pathname)) { try { const j = await r.json(); reqs.push({ t: Date.now(), path: u.pathname + ' <-', kind: j.kind, ok: j.ok, audio: !!j.audioUrl, text: (j.text || j.answer || j.best_guess || '').slice(0, 60) }); } catch {} } });
+page.on('response', async (r) => { const u = new URL(r.url()); if (/^\/(bridge|answer|understand|opener)$/.test(u.pathname)) { try { const j = await r.json(); reqs.push({ t: Date.now(), path: u.pathname + ' <-', kind: j.kind, ok: j.ok, query: j.query, audio: !!j.audioUrl, text: (j.text || j.answer || j.best_guess || '').slice(0, 60) }); } catch {} } });
 page.on('pageerror', (e) => { console.error('PAGE ERROR', e.message); process.exitCode = 1; });
 page.on('console', (m) => { if (m.type() === 'error' || m.type() === 'warning') console.error('CONSOLE', m.type(), m.text().slice(0, 200)); });
 page.on('requestfailed', (r) => console.error('REQUEST FAILED', r.url(), r.failure() && r.failure().errorText));
@@ -37,7 +37,10 @@ await page.click('h1');                                 // first gesture → gre
 await sleep(1500);
 const q = 'Wie hoch ist die Arbeitslosenquote in Kiel?';
 await page.fill('#q', q); await page.click('#go');
-await page.waitForFunction(() => document.querySelector('#src').style.display === 'flex', null, { timeout: 30000 });
+const dumpState = () => page.evaluate(() => JSON.stringify({ a: document.querySelector('#a').textContent.slice(0, 80), src: document.querySelector('#src').style.display, go: document.querySelector('#go').disabled,
+  queue: (window.ccPlayer && window.ccPlayer.queue || []).map((it) => [it.part, it.ready, it.started, it.played]), busy: window.ccPlayer && window.ccPlayer.busy, ev: window.__ev }));
+try { await page.waitForFunction(() => document.querySelector('#src').style.display === 'flex', null, { timeout: 45000 }); }
+catch (e) { console.error('answer panel never appeared; page state:', await dumpState()); console.error('requests so far:', JSON.stringify(reqs)); throw e; }
 await page.waitForFunction(() => [...document.querySelectorAll('#examples .ex')].some((b) => b.dataset.source === 'followup'), null, { timeout: 30000 });
 await sleep(4000);
 await page.click('#examples .ex.best');                 // ✓ Ja → continuation
@@ -75,11 +78,15 @@ for (const ar of answerResps) {
   const next = plays.find((p) => p.t > ar.t);
   if (!next) { fail('no clip after answer at ' + rel(ar.t)); continue; }
   if (playingEnd && next.t - playingEnd.t > 1500) fail('answer did not start right after the current clip (gap ' + (next.t - playingEnd.t) + 'ms) at ' + rel(ar.t));
-  const bridgeAfter = reqs.filter((r) => r.path === '/bridge' && r.t > ar.t && r.t < next.t);
-  if (bridgeAfter.length) fail('bridging still requested after the answer was ready');
+  // no bridging for THIS query after its answer was ready (a following turn may legitimately open
+  // its own bridging while the previous answer is still queued behind a playing clip)
+  const bridgeAfter = reqs.filter((r) => r.path === '/bridge' && r.t > ar.t && r.t < next.t && r.body && r.body.query === ar.query);
+  if (bridgeAfter.length) fail('bridging still requested after the answer was ready for ' + ar.query);
 }
 const kinds = reqs.filter((r) => r.path === '/bridge <-').map((r) => r.kind);
-if (!kinds.includes('fact')) fail('no prepared fact was used as a bridge');
+// a fact is only reached when the wait outlasts opener + verstehen (run the server with
+// CC_STUB_ANSWER_MS >= 16000 for this to be exercised; a fast answer is never padded)
+if (!kinds.includes('fact')) fail('no prepared fact was used as a bridge (is CC_STUB_ANSWER_MS long enough?)');
 if (!kinds.includes('verstehen')) fail('no verstehen echo');
 const fact = reqs.find((r) => r.path === '/bridge <-' && r.kind === 'fact');
 if (fact && !/Wussten Sie schon/.test(fact.text)) fail('fact text unexpected: ' + fact.text);

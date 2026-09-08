@@ -58,11 +58,11 @@ export const NEUTRAL_BRIDGES = [
 ];
 // Templated context bridge: {ind} / {ort} come from the previous turn's resolved slots. No LLM.
 export const CONTEXT_BRIDGE_TEMPLATES = [
-  'Nach {ind} in {ort} schauen wir jetzt gleich weiter.',
-  'Gerade hatten wir {ind} in {ort} — jetzt sehe ich nach Ihrer nächsten Frage.',
+  'Nach dem Thema {ind} in {ort} schauen wir jetzt gleich weiter.',
+  'Gerade ging es um das Thema {ind} in {ort} — jetzt sehe ich nach Ihrer nächsten Frage.',
   'Bleiben wir im Fluss: nach {ort} kommt jetzt Ihre neue Frage dran, einen Moment.',
   'Gut, von {ort} aus geht es weiter — ich hole die nächsten Zahlen.',
-  'Alles klar, nach {ind} in {ort} prüfe ich jetzt das Nächste für Sie.',
+  'Alles klar, nach dem Thema {ind} in {ort} prüfe ich jetzt das Nächste für Sie.',
 ];
 export const GAP_TEXTS = [
   'Einen Moment — ich schaue die aktuellen Zahlen im Deutschlandatlas für Sie nach.',
@@ -173,7 +173,7 @@ export async function opener(kind, context = {}, userKey = 'anon') {
   const ort = (context.lastPlace || '').trim(), ind = (context.lastIndicator || '').trim();
   if (ort) {
     const tpl = rotate(userKey, 'bridge', ind ? CONTEXT_BRIDGE_TEMPLATES : CONTEXT_BRIDGE_TEMPLATES.filter((t) => !t.includes('{ind}')));
-    const text = tpl.replace('{ind}', ind ? ('dem Thema ' + ind) : '').replace('{ort}', ort).replace(/\s{2,}/g, ' ');
+    const text = tpl.replace('{ind}', ind).replace('{ort}', ort).replace(/\s{2,}/g, ' ');
     return { kind, text, audioUrl: await dynamicClip(text, userKey) };
   }
   return { kind, ...fromPool('neutral', userKey) };

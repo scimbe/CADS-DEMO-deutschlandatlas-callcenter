@@ -97,7 +97,15 @@ async function handle(req, res) {
     const u = await understand(query, b.context, CATALOG_SUMMARY);
     trace('understand', { query, precise: u.precise, kind: u.kind, clarify: u.clarify.slice(0, 70), best_guess: u.best_guess, slots: u.slots });
     answerFor(u.best_guess, false, userKey);                // also warm the resolved query (cache hit when unchanged)
-    if (u.precise) bridging.verstehen(u.best_guess, userKey).catch(() => {});   // prefetch the echo the client asks for next
+    if (u.precise) {
+      bridging.verstehen(u.best_guess, userKey).catch(() => {});   // prefetch the echo the client asks for next
+      // Follow-up candidates ("same question, other city") are answerable by construction — start
+      // their DATA speculation now, in parallel with the real answer (low priority), so /followup can
+      // validate them within its budget instead of racing pipelines that only began when the answer
+      // returned (that race left slow turns without any follow-up).
+      const place = (u.slots && u.slots.ort) || placeFromQuery(u.best_guess) || '';
+      swapCityFollowups(u.best_guess, place, 3).forEach((s) => { answerFor(s, false, userKey); });
+    }
     let clarifyAudioUrl = null;
     if (!u.precise && u.clarify) { try { clarifyAudioUrl = proxied(await ttsSpeak(u.clarify, { priority: true, userKey })); } catch {} }
     return jsonRes(res, 200, { ...u, clarifyAudioUrl });
