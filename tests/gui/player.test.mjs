@@ -103,7 +103,7 @@ function fakeUi() {
 test('a full turn: opener at t=0, bridging while waiting, answer takes priority, invite after', async () => {
   const a = fakeAudio({ '/service_intro0.wav': 60, '/gap1.wav': 40, '/verstehen2.wav': 40, '/fact3.wav': 40 });
   const player = new Player(a), api = fakeApi({ answerMs: 150 }), ui = fakeUi();
-  const d = new Dialog({ player, api, ui });
+  const d = new Dialog({ player, api, ui, bridgePauseMs: 0 });   // pause tested separately (I12)
   await d.start(['Wie hoch ist die Arbeitslosenquote in Kiel?']);
   d.ask('Wie hoch ist die Arbeitslosenquote in Kiel?');
   await tick(5);
@@ -207,11 +207,67 @@ test('the understood place reaches the fact bridge while the answer is fetched',
   const api = fakeApi({ answerMs: 250 });
   const seen = [];
   const bridge = api.bridge; api.bridge = async (kind, query, place) => { seen.push([kind, place]); return bridge(kind, query, place); };
-  const d = new Dialog({ player, api, ui });
+  const d = new Dialog({ player, api, ui, bridgePauseMs: 0 });
   await d.start([]);
   d.ask('Wie hoch ist die Arbeitslosenquote in Kiel?');
   await tick(500); await done(player);
   const fact = seen.find((s) => s[0] === 'fact');
   assert.ok(fact, 'a fact bridge was requested during the slow answer');
   assert.equal(fact[1], 'Kiel', 'with the place understood for THIS question');
+});
+
+test('I12: a pause separates filler clips — each filler starts only after the previous one ended plus the pause', async () => {
+  const DUR = 40, PAUSE = 250;
+  const a = fakeAudio(new Proxy({}, { get: (_, k) => (String(k).includes('service_intro') ? 20 : DUR) }));
+  const player = new Player(a), api = fakeApi({ answerMs: 900 }), ui = fakeUi();
+  const starts = []; const origPlay = a.play; a.play = () => { starts.push([a.src, Date.now()]); return origPlay(); };
+  const d = new Dialog({ player, api, ui, bridgePauseMs: PAUSE });
+  await d.start([]);
+  d.ask('Wie hoch ist die Arbeitslosenquote in Kiel?');
+  await tick(1300); await done(player);
+  const fillers = starts.filter(([u]) => /gap|fact|verstehen/.test(u));
+  assert.ok(fillers.length >= 2, 'several fillers were spoken during the 900 ms wait: ' + JSON.stringify(starts));
+  for (let i = 1; i < fillers.length; i++) {
+    const [url, ts] = fillers[i], [, prev] = fillers[i - 1];
+    if (/verstehen/.test(url)) continue;                       // the echo follows promptly (exempt)
+    assert.ok(ts - prev >= DUR + PAUSE - 15, `${url} started ${ts - prev} ms after the previous filler; expected >= ${DUR + PAUSE}`);
+  }
+  assert.ok(a.log.includes('/answer.wav'));
+});
+
+test('I2 still wins during a pause: an answer that arrives mid-pause plays at once, no further filler', async () => {
+  const a = fakeAudio({ '/service_intro0.wav': 20, '/gap1.wav': 30, '/verstehen2.wav': 30 });
+  const player = new Player(a), api = fakeApi({ answerMs: 200 }), ui = fakeUi();
+  const d = new Dialog({ player, api, ui, bridgePauseMs: 2000 });
+  await d.start([]);
+  d.ask('Wie hoch ist die Arbeitslosenquote in Kiel?');
+  await tick(500); await done(player);
+  assert.ok(a.log.includes('/answer.wav'), 'answer spoken within the pause window');
+  assert.ok(!a.log.includes('/fact3.wav'), 'no fact was started after the answer');
+});
+
+test('I8: a late /followup still speaks the invite (no fixed cutoff) as long as no new turn began', async () => {
+  const a = fakeAudio({ '/service_intro0.wav': 20 });
+  const player = new Player(a), ui = fakeUi();
+  const api = fakeApi({ answerMs: 20 });
+  const slowFollowup = api.followup; api.followup = async () => { await tick(400); return slowFollowup(); };
+  const d = new Dialog({ player, api, ui });
+  await d.start([]);
+  d.ask('Wie hoch ist die Arbeitslosenquote in Kiel?');
+  await tick(250); await done(player);
+  assert.ok(a.log.includes('/answer.wav') && !a.log.includes('/invite.wav'), 'answer done, invite not there yet');
+  await tick(350); await done(player);
+  assert.equal(a.log.at(-1), '/invite.wav', 'the invite is spoken when it arrives');
+  assert.equal(ui.bubbleLog.at(-1).source, 'followup');
+});
+
+test('Player.endedP resolves after the clip played, and at once for skipped or dropped slots', async () => {
+  const a = fakeAudio({ '/x.wav': 60 });
+  const player = new Player(a);
+  const s1 = player.enqueue(PART.GAP); const s2 = player.enqueue(PART.GAP); const s3 = player.enqueue(PART.GAP);
+  player.fill(s1, '/x.wav'); player.fill(s2, null);
+  const t0 = Date.now();
+  assert.equal(await s1.endedP, 'played'); assert.ok(Date.now() - t0 >= 50, 'ended only after the clip');
+  assert.equal(await s2.endedP, 'skipped');
+  player.drop(s3); assert.equal(await s3.endedP, 'dropped');
 });

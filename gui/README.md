@@ -48,7 +48,7 @@ Spoken parts and their class:
 *soft* = bridging only: dropped if the answer is ready before it started. *hard* = always spoken to
 the end. The bridging loop requests one prepared part at a time (lookahead 1): verstehen → fact →
 gap → gap …; if `/understand` is slow, a gap comes first and the verstehen echo replaces the next
-queued gap. `GET /fsm` returns the machine, the part classes and the eleven invariants (I1–I11).
+queued gap. `GET /fsm` returns the machine, the part classes and the twelve invariants (I1–I12).
 
 Preparation (the "prepared" half of the flow):
 - **Pools** (`gui/lib/bridging.mjs`) are warmed once at boot, self-healing, protected from pruning,

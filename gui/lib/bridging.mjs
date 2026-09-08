@@ -191,7 +191,12 @@ export function inviteText(q, userKey = 'anon') {
   let core = null;
   const m = s.match(/^wie\s+hoch\s+ist\s+(.+?)\s+in\s+(.+)$/i);
   if (m) core = `wie hoch ${m[1]} in ${m[2]} ist`;
-  if (!core) { const m2 = s.match(/^wie\s+viele?\s+(.+?)\s+(?:gibt es\s+)?in\s+(.+)$/i); if (m2) core = `wie viele ${m2[1]} es in ${m2[2]} gibt`; }
+  if (!core) {
+    // "Wie viele Hausärzte gibt es je 100.000 Einwohner in Hamburg?" → "wie viele Hausärzte je
+    // 100.000 Einwohner es in Hamburg gibt": the "gibt es" moves to the end wherever it stood.
+    const m2 = s.match(/^wie\s+viele?\s+(.+?)\s+in\s+(.+)$/i);
+    if (m2) core = `wie viele ${m2[1].replace(/\s*\bgibt\s+es\b\s*/i, ' ').replace(/\s+/g, ' ').trim()} es in ${m2[2]} gibt`;
+  }
   return core ? rotate(userKey, 'invite', INVITE_LEADS_PARSED).replace('{core}', core) : rotate(userKey, 'invite', INVITE_LEADS_RAW).replace('{s}', s);
 }
 

@@ -26,6 +26,9 @@ export class Player {
   enqueue(part, { optional = false } = {}) {
     const item = { id: ++this.seq, part, url: null, ready: false, started: false, played: false, optional, soft: isSoft(part) };
     item.startedP = new Promise((res) => { item._start = res; });
+    // endedP: resolves when the clip has finished playing, or at once for a skipped/dropped slot
+    item.endedP = new Promise((res) => { item._end = res; });
+    item.startedP.then((how) => { if (how !== 'playing') item._end(how); });
     this.queue.push(item);
     return item;
   }
@@ -66,7 +69,7 @@ export class Player {
     this.hooks.onSpeaking && this.hooks.onSpeaking(true, it);
     const a = this.audio;
     let started = false, advanced = false;
-    const advance = () => { if (advanced) return; advanced = true; this.busy = false; this.hooks.onSpeaking && this.hooks.onSpeaking(false, it); this.timers.set(() => this.pump(), 0); };
+    const advance = () => { if (advanced) return; advanced = true; this.busy = false; it._end('played'); this.hooks.onSpeaking && this.hooks.onSpeaking(false, it); this.timers.set(() => this.pump(), 0); };
     a.onended = advance; a.onerror = advance;
     const start = () => { if (started || this.paused) return; started = true;
       const pr = a.play(); if (pr && pr.catch) pr.catch(() => { if (!a.ended && (a.paused || a.currentTime === 0)) advance(); }); };
@@ -85,7 +88,7 @@ export class Player {
   }
   /** Stop everything queued (user pressed Stop). */
   stopAll() {
-    for (const it of this.queue) { if (!it.played) { it.played = true; it._start('dropped'); } }
+    for (const it of this.queue) { if (!it.played) { it.played = true; it._start('dropped'); } it._end('dropped'); }
     this.queue = []; this.busy = false; this.paused = false;
     try { this.audio.pause(); this.audio.currentTime = 0; this.audio.onended = null; } catch {}
     this.hooks.onSpeaking && this.hooks.onSpeaking(false, null);
@@ -94,6 +97,11 @@ export class Player {
 }
 
 const withTimeout = (p, ms, fallback = null) => Promise.race([p, new Promise((res) => setTimeout(() => res(fallback), ms))]);
+const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+/** I12: silence between filler clips. A slow Atlas answer is bridged by ONE clip, then a pause of
+ *  this length, then the next — never a back-to-back stream of fillers. The answer ends the pause
+ *  the moment it is ready (I2). The VERSTEHEN echo is exempt: it follows the opener promptly. */
+export const BRIDGE_PAUSE_MS = 7000;
 
 export class Dialog {
   /**
@@ -104,8 +112,8 @@ export class Dialog {
    *        bubbles(items, note, source), examples(), clarify(text), busy(bool), error(msg),
    *        ffToggle()->bool (speak facts?)
    */
-  constructor({ player, api, ui }) {
-    this.player = player; this.api = api; this.ui = ui;
+  constructor({ player, api, ui, bridgePauseMs = BRIDGE_PAUSE_MS }) {
+    this.player = player; this.api = api; this.ui = ui; this.bridgePauseMs = bridgePauseMs;
     this.turnCount = 0; this.history = []; this.lastQuery = null; this.lastAnswer = null;
     this.slots = { ort: null, indikator: null }; this.pending = null; this.followupActive = false; this.offered = null;
     this.session = null; this.nextContextBridge = null; this.turnSeq = 0; this.turn = null; this.greeted = false;
@@ -183,8 +191,16 @@ export class Dialog {
 
   /** Bridging loop (I4/I5): one prepared part at a time, next one requested when the current starts. */
   async _bridgeLoop(turn) {
+    let spoken = null;                                  // the last bridging clip that actually played
     while (turn.active && turn.waiting) {
       const kind = nextBridgeKind(turn.bridge);
+      // I12: after a spoken filler, a pause before the next one (not before the verstehen echo)
+      if (spoken && kind !== BRIDGE_KIND.VERSTEHEN) {
+        await spoken.endedP;
+        if (!turn.active || !turn.waiting) return;
+        await sleep(this.bridgePauseMs);
+        if (!turn.active || !turn.waiting) return;
+      }
       const slot = this.player.enqueue(kind);
       const q = turn.resolvedQuery || turn.query;
       const clip = await withTimeout(this.api.bridge(kind, q, turn.place).catch(() => null), kind === BRIDGE_KIND.VERSTEHEN ? 4000 : 2500);
@@ -195,6 +211,7 @@ export class Dialog {
       this.player.fill(slot, speak ? clip.audioUrl : null);
       const how = await slot.startedP;              // 'playing' | 'skipped' | 'dropped'
       if (how === 'dropped') return;                // the answer (or a new turn) took over
+      if (how === 'playing') spoken = slot;
     }
   }
 
@@ -219,9 +236,11 @@ export class Dialog {
     this.lastQuery = query; this.lastAnswer = ans;
     const place = (d.meta && (d.meta.place_resolved || d.meta.place_name_requested)) || null;
     this.history.push({ q: query, place, answer: ans }); if (this.history.length > 6) this.history.shift();
-    // INVITE (I8): optional tail — spoken if ready in time, else the bubbles alone
+    // INVITE (I8): optional tail — spoken whenever /followup answers, as long as no new turn has
+    // dropped the slot. (A fixed cutoff here left the invite silent on every slow /followup: the
+    // bubbles appeared, the "Ja" was on screen, but the spoken question never came.)
     const sI = this.player.enqueue(PART.INVITE, { optional: true });
-    withTimeout(this._followup(query, ans), 14000).then((url) => this.player.fill(sI, url));
+    withTimeout(this._followup(query, ans), 60000).then((url) => this.player.fill(sI, url));
     turn.active = false;
     this._prepareNext();
   }

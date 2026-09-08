@@ -295,7 +295,7 @@ import { Player, Dialog } from '/dialog-client.mjs';
     error(msg){ stopWait(); aEl.className='a'; aEl.textContent=tr('connError')+msg; },
     ffToggle(){ return !speakFfEl || speakFfEl.checked; },
   };
-  const dialog=new Dialog({player:speech, api, ui});
+  const dialog=new Dialog({player:speech, api, ui, ...(Number.isFinite(window.CC_BRIDGE_PAUSE_MS)?{bridgePauseMs:window.CC_BRIDGE_PAUSE_MS}:{})});   // I12 pause; CC_BRIDGE_PAUSE_MS overrides (tests)
   dialog.start(examples);
 
   // ---------- greeting on the FIRST gesture (I7), welcome hint ----------
