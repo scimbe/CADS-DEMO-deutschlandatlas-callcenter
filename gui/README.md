@@ -95,7 +95,37 @@ gui/lib/stt.mjs         channel-first STT, whisper.cpp fallback
 gui/lib/llm.mjs         understand / follow-up / narrate / Wikipedia fact (+ stubs)
 gui/lib/pipeline.mjs    the grounded answer: runtime spawn, speculation + reuse caches, verified pool
 gui/lib/bridging.mjs    pools, N1 fact store, openers, verstehen echo, invite text
+gui/lib/providers/      per-service backend switch (local vs. Cloudflare Workers AI) — see below
 ```
+
+## AI provider switch (local vs. Cloudflare Workers AI)
+
+Each of the three AI-dependent services — LLM, TTS, STT — can independently run against either
+"local" (litellm-proxy + the llm2 ct-agent channel/Piper/whisper.cpp — entirely EU-hosted, DSGVO-
+conform) or "cloudflare" ([Workers AI](https://developers.cloudflare.com/workers-ai/)). Nothing
+else in the app needs to know which is active — `understand()`, `narrate()`, `ttsSpeak()`,
+`transcribe()` all keep the same call sites regardless (`gui/lib/providers/config.mjs` decides,
+`gui/lib/providers/cloudflare.mjs` holds the Cloudflare calls).
+
+```bash
+# .env at the repo root (gitignored, loaded automatically via process.loadEnvFile()) — copy the
+# relevant lines from deploy/.env.template:
+AI_PROVIDER=cloudflare          # or per-service: LLM_PROVIDER / TTS_PROVIDER / STT_PROVIDER
+CLOUDFLARE_ACCOUNT_ID=...
+CLOUDFLARE_API_TOKEN=...        # needs the "Workers AI" permission
+```
+
+**GDPR/DSGVO**: switching ANY service to `cloudflare` makes the GUI show a banner (and swaps one
+spoken service-intro variant that used to claim EU-only processing) — Cloudflare Workers AI is a
+global network, not the EU-hosted guarantee the local setup was built on. `GET /providers` /
+`GET /health`'s `providers` field expose the active per-service state.
+
+Model defaults in `cloudflare.mjs` are chosen to fit inside Workers AI's free daily neuron
+allowance (usable on the Workers Free plan, no paid add-on) rather than the largest model in each
+category — override `CLOUDFLARE_{LLM,TTS,STT}_MODEL` if you need something bigger. The STT/TTS wire
+formats there are marked as needing verification against a real account (Cloudflare's docs were
+imprecise on binary in/out encoding at the time this was written) — the LLM path uses Cloudflare's
+documented OpenAI-compatible endpoint and needs no such caveat.
 
 ## Tests
 ```

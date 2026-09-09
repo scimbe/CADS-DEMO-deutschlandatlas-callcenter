@@ -21,6 +21,10 @@
 //
 // Env: PORT (8791), CC_HOST; LITELLM_*; CC_TTS=1 + channel/Piper vars (see lib/tts.mjs);
 //      CC_STUB=1 + CC_TTS_STUB=1 run the whole dialogue offline (tests / demo without a proxy).
+// Load .env (Cloudflare credentials etc.) before anything else reads process.env — native Node,
+// no dotenv dependency (stable since Node 20.6+). Silently no-ops if .env doesn't exist (nothing
+// to load, e.g. in a container that sets real env vars directly instead).
+try { process.loadEnvFile(); } catch {}
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
@@ -34,6 +38,7 @@ import { channelStats, closeChannels, warmChannels } from './lib/channel.mjs';
 import { catalogSummary, understand, followupSuggestions, STUB } from './lib/llm.mjs';
 import { configurePipeline, answerFor, hasRealData, validateSuggestions, poolSuggestions, trace, traceLines, pipelineStats } from './lib/pipeline.mjs';
 import * as bridging from './lib/bridging.mjs';
+import { providerSummary } from './lib/providers/config.mjs';
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dir, '..');
@@ -257,7 +262,12 @@ async function handle(req, res) {
     return;
   }
   if (req.method === 'GET' && url === '/health') {
-    return jsonRes(res, 200, { status: 'ok', uptime_s: Math.round(process.uptime()), pid: process.pid, stub: STUB, pools: bridging.poolStats(), facts: bridging.factStats() });
+    return jsonRes(res, 200, { status: 'ok', uptime_s: Math.round(process.uptime()), pid: process.pid, stub: STUB, pools: bridging.poolStats(), facts: bridging.factStats(), providers: providerSummary() });
+  }
+  if (req.method === 'GET' && url === '/providers') {
+    // Same info as /health's "providers" field, as its own tiny endpoint so the GUI can poll just
+    // this (e.g. to render the GDPR banner) without depending on /health's shape.
+    return jsonRes(res, 200, providerSummary());
   }
   if (req.method === 'GET' && url === '/ready') {
     const limiters = { pipeline: pipelineStats(), ...limiterStats(), channels: channelStats() };

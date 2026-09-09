@@ -15,6 +15,8 @@ import { tmpdir } from 'node:os';
 import { makeLimiter } from './limiter.mjs';
 import { ttsSafe } from './text.mjs';
 import { channelFor, channelCommand } from './channel.mjs';
+import { TTS_PROVIDER } from './providers/config.mjs';
+import * as cloudflare from './providers/cloudflare.mjs';
 
 export const TTS_DIR = join(tmpdir(), 'cc-tts');
 let ttsSeq = 0;
@@ -137,6 +139,16 @@ function ttsChannelOneShot(text, voice = 'primary') {
 
 // A channel clip's https URL lives in memory on llm2's side for ~15 min: a prepared clip played
 // later would 404. Fetch the bytes on receipt and cache them under our own /tts/ dir.
+async function ttsCloudflareClip(text) {
+  const buf = await cloudflare.synthesize(text);
+  if (!buf || !buf.length) return null;
+  const { wav, url } = newClipPath('cf-');
+  await writeFile(wav, buf);
+  await applyFadeIn(wav);
+  pruneTtsDir();
+  return url;
+}
+
 async function localizeChannelClip(url) {
   try {
     const resp = await fetch(url);
@@ -174,6 +186,7 @@ export function ttsSpeak(text, { priority = false, userKey = 'anon', stream = fa
   if (!text) return Promise.resolve(null);
   if (process.env.CC_TTS_STUB === '1') return ttsStub(text).catch(() => null);
   if (process.env.CC_TTS !== '1') return Promise.resolve(null);
+  if (TTS_PROVIDER === 'cloudflare') return ttsCloudflareClip(text).catch(() => null);
   const channelReady = process.env.CT_AGENT_BIN && process.env.CT_RELAY_ENV && process.env.CT_AUDIO_CHANNEL_ID;
   const piperReady = process.env.CC_PIPER_BIN && process.env.CC_PIPER_MODEL;
   const fallbackPiper = () => (piperReady ? ttsLocalPiper(text, priority, userKey).catch(() => null) : Promise.resolve(null));

@@ -27,6 +27,9 @@
   .eyebrow .dot{width:7px;height:7px;border-radius:50%;background:var(--teal);box-shadow:0 0 12px rgba(53,194,168,.5)}
   h1{font-family:"Fraunces",Georgia,serif;font-weight:600;font-size:clamp(1.6rem,3.6vw,2.3rem);margin:.3em 0 .1em;letter-spacing:-.01em;line-height:1.08;text-wrap:balance}
   .lede{color:var(--dim);max-width:56ch;font-size:.98rem}
+  .gdprBanner{margin-top:14px;padding:10px 14px;border:1px solid rgba(228,178,74,.4);background:rgba(228,178,74,.1);
+    border-radius:10px;font-size:.85rem;color:var(--ink);display:flex;align-items:flex-start;gap:.6em;max-width:64ch}
+  .gdprBanner::before{content:'⚠';flex:0 0 auto}
   .stage{margin-top:22px;border:1px solid var(--line);border-radius:16px;overflow:hidden;background:linear-gradient(180deg,rgba(255,255,255,.02),transparent)}
   .orbcard{position:relative;height:230px}
   #viz{position:absolute;inset:0;width:100%;height:100%}
@@ -104,6 +107,7 @@
   <h1 data-i18n="h1">Stellen Sie eine Frage — die Antwort kommt aus echten, live abgefragten Daten.</h1>
   <p class="lede" data-i18n="lede">Fragen Sie zu einem Ort in Deutschland (Kriminalität, Bildung, Beschäftigung, Wohnen …). Der Agent
     sucht die passende Deutschlandatlas-Tabelle, fragt sie live ab und antwortet geerdet — oder lehnt ehrlich ab.</p>
+  <div class="gdprBanner" id="gdprBanner" hidden></div>
 
   <div class="stage">
     <div class="orbcard">
@@ -239,6 +243,21 @@ import { Player, Dialog } from '/dialog-client.mjs';
     items.forEach(it=>{const b=document.createElement('button');b.className='ex'+(it.best?' best':'');b.textContent=it.label;b.onclick=it.onClick;b.dataset.source=source||'unknown';exWrap.appendChild(b);});}
   function renderExamples(){renderBubbles(examples.map(x=>({label:x,onClick:()=>{q.value=x;ask();}})),'example');}
   renderExamples();
+
+  // GDPR banner: shown the instant ANY AI service is on a non-EU provider (Cloudflare Workers AI —
+  // see gui/lib/providers/config.mjs). /providers is cheap and static per deploy, fetched once.
+  (async()=>{
+    try{
+      const p=await (await fetch('/providers')).json();
+      if(!p || !p.gdprNotice) return;
+      const el=document.getElementById('gdprBanner');
+      const svc=[['LLM',p.llm],['Sprachausgabe',p.tts],['Spracherkennung',p.stt]].filter(([,v])=>v==='cloudflare').map(([n])=>n).join(', ');
+      el.textContent=(lang==='en')
+        ? 'Note: this demo currently routes '+svc+' through Cloudflare Workers AI (not the EU-hosted setup) — treat it as NOT GDPR/DSGVO-compliant.'
+        : 'Hinweis: Diese Demo nutzt aktuell für '+svc+' Cloudflare Workers AI statt der EU-gehosteten Variante — bitte NICHT als DSGVO-konform behandeln.';
+      el.hidden=false;
+    }catch(e){}
+  })();
 
   // ---------- status / timer / typing ----------
   let statusTimer=null,tickTimer=null,t0=0;

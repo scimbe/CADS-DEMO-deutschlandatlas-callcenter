@@ -16,6 +16,7 @@ import { rotate, rotFor } from './limiter.mjs';
 import { placeKey, ttsSafe } from './text.mjs';
 import { narrate, wikiFunFact } from './llm.mjs';
 import { OPENER_KIND, BRIDGE_KIND } from '../dialog-fsm.mjs';
+import { usesNonEuProvider } from './providers/config.mjs';
 
 // --- prepared pools (texts) ---------------------------------------------------------------------
 export const GREETINGS = [
@@ -25,9 +26,16 @@ export const GREETINGS = [
   'Willkommen. Ich bin bereit — nennen Sie mir einfach einen Ort und eine Kennzahl.',
   'Schön, dass Sie da sind. Fragen Sie mich gern etwas zu den Regionaldaten in Deutschland.',
 ];
+// The 2nd variant used to unconditionally claim "das Sprachmodell dahinter arbeitet DSGVO-konform
+// in Deutschland" — TRUE for the local provider (litellm-proxy + ct-agent, entirely EU-hosted),
+// FALSE the moment any service runs on Cloudflare Workers AI (see providers/config.mjs). Rather
+// than speak a false compliance claim ~1 turn in 6, swap it for a neutral variant whenever a
+// non-EU provider is active; the GUI banner (index.html) carries the actual disclosure.
 export const SERVICE_INTROS = [
   'Willkommen beim Deutschlandatlas-Sprach-Callcenter. Übrigens: dies ist eine Demo auf dem Bunsenbrenner-Marktplatz — jede Antwort ist auf echten, live abgefragten Zahlen geerdet, nichts wird erfunden.',
-  'Schön, dass Sie da sind. Gut zu wissen: Ich laufe als Bunsenbrenner-Demo über einen abgesicherten Tunnel, und das Sprachmodell dahinter arbeitet DSGVO-konform in Deutschland.',
+  usesNonEuProvider
+    ? 'Schön, dass Sie da sind. Gut zu wissen: Ich laufe als Bunsenbrenner-Demo über einen abgesicherten Tunnel — welche KI-Dienste im Hintergrund laufen, sehen Sie im Hinweis am Seitenende.'
+    : 'Schön, dass Sie da sind. Gut zu wissen: Ich laufe als Bunsenbrenner-Demo über einen abgesicherten Tunnel, und das Sprachmodell dahinter arbeitet DSGVO-konform in Deutschland.',
   'Hier spricht das Deutschlandatlas-Callcenter. Kleiner Hinweis vorweg: die Zahlen kommen direkt aus dem offiziellen Deutschlandatlas, und wenn ich zu etwas keine Daten habe, sage ich das ehrlich, statt zu raten.',
   'Guten Tag, willkommen beim Sprach-Callcenter zum Deutschlandatlas. Ein Tipp: Sie können mich ganz natürlich fragen, etwa nach der Arbeitslosenquote oder dem Ausländeranteil eines Ortes — ich sehe dann live in den echten Daten nach.',
   'Willkommen. Dies ist eine von mehreren Bunsenbrenner-Demos, die zeigen, wie sich KI faktentreu einsetzen lässt — hier für Regionaldaten aus dem Deutschlandatlas. Nennen Sie mir einfach einen Ort und eine Kennzahl.',

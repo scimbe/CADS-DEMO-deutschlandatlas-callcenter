@@ -5,6 +5,8 @@ import { resolveOffered } from '../dialog-fsm.mjs';
 // dialogue can be exercised (tests, offline demo) without a proxy or the network.
 import { readFileSync } from 'node:fs';
 import { placeFromQuery, stripPronunciation, splitSentences } from './text.mjs';
+import { LLM_PROVIDER } from './providers/config.mjs';
+import * as cloudflare from './providers/cloudflare.mjs';
 
 export const STUB = process.env.CC_STUB === '1';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -28,6 +30,7 @@ export function catalogSummary(catalogPath) {
 }
 
 async function chat(body) {
+  if (LLM_PROVIDER === 'cloudflare') return cloudflare.chat(body);
   const base = (process.env.LITELLM_BASE_URL || '').replace(/\/$/, '');
   const key = process.env.LITELLM_API_KEY, model = process.env.LITELLM_DEFAULT_MODEL || 'local-devstral-small2';
   const RETRIES = 3;

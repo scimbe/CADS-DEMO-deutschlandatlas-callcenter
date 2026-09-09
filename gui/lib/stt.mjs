@@ -9,6 +9,8 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { channelFor, channelCommand } from './channel.mjs';
+import { STT_PROVIDER } from './providers/config.mjs';
+import * as cloudflare from './providers/cloudflare.mjs';
 
 let sttSeq = 0;
 function run(cmd, args) {
@@ -97,6 +99,11 @@ export function silentWav(rate = 16000, seconds = 0.6) {
 /** Transcribe caller audio (any ffmpeg-readable format). publicBase = origin llm2 can fetch from. */
 export async function transcribe(buf, publicBase) {
   if (!buf || !buf.length) return '';
+  if (STT_PROVIDER === 'cloudflare') {
+    const wav16 = await toWav16k(buf);
+    const t = wav16 ? await cloudflare.transcribe(wav16) : '';
+    return t || transcribeLocal(buf);   // never silent: fall back to local whisper.cpp on any Cloudflare failure
+  }
   const channelReady = process.env.CC_STT_CHANNEL === '1' && process.env.CT_AGENT_BIN && process.env.CT_RELAY_ENV && process.env.CT_AUDIO_CHANNEL_ID && publicBase;
   if (channelReady) {
     const wav = await toWav16k(buf);
