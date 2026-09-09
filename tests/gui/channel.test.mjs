@@ -129,3 +129,12 @@ test('warm() holds idle processes before any call, so the first call pays no spa
     assert.equal(c.status().spawns, 2);
   } finally { c.close(); }
 });
+
+test('silentWav builds a valid 16-bit mono PCM WAV of the requested length', async () => {
+  const { silentWav } = await import('../../gui/lib/stt.mjs');
+  const b = silentWav(16000, 0.5);
+  assert.equal(b.toString('ascii', 0, 4), 'RIFF'); assert.equal(b.toString('ascii', 8, 12), 'WAVE');
+  assert.equal(b.readUInt16LE(22), 1, 'mono'); assert.equal(b.readUInt32LE(24), 16000); assert.equal(b.readUInt16LE(34), 16);
+  assert.equal(b.readUInt32LE(40), 16000, '0.5 s of 16-bit samples'); assert.equal(b.length, 44 + 16000);
+  assert.ok(b.subarray(44).every((x) => x === 0), 'silence');
+});
