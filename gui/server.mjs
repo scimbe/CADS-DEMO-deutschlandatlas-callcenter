@@ -30,7 +30,7 @@ import { userKeyFor } from './lib/limiter.mjs';
 import { placeFromQuery, swapCityFollowups } from './lib/text.mjs';
 import { ttsSpeak, proxied, TTS_DIR, streamClips, limiterStats, protectClip, unprotectClip } from './lib/tts.mjs';
 import { transcribe, sttBlobPath } from './lib/stt.mjs';
-import { channelStats, closeChannels } from './lib/channel.mjs';
+import { channelStats, closeChannels, warmChannels } from './lib/channel.mjs';
 import { catalogSummary, understand, followupSuggestions, STUB } from './lib/llm.mjs';
 import { configurePipeline, answerFor, hasRealData, validateSuggestions, poolSuggestions, trace, traceLines, pipelineStats } from './lib/pipeline.mjs';
 import * as bridging from './lib/bridging.mjs';
@@ -276,7 +276,14 @@ async function handle(req, res) {
 let shuttingDown = false;
 const server = createServer((req, res) => { handle(req, res).catch((e) => { console.error('route error', req.url, e); try { if (!res.headersSent) res.writeHead(500); res.end('error'); } catch {} }); });
 const HOST = process.env.CC_HOST || '127.0.0.1';
-server.listen(PORT, HOST, () => { console.log(`callcenter GUI on http://${HOST}:${PORT}${STUB ? ' (STUB mode)' : ''}`); bridging.prewarm(); });
+server.listen(PORT, HOST, () => {
+  console.log(`callcenter GUI on http://${HOST}:${PORT}${STUB ? ' (STUB mode)' : ''}`);
+  // Hold the channel processes from the start: the first dictation after a restart otherwise pays
+  // the join+pair itself (8.7 s measured live, against 1.7-2.0 s for every call after it).
+  const channelReady = process.env.CT_AGENT_BIN && process.env.CT_RELAY_ENV && process.env.CT_AUDIO_CHANNEL_ID;
+  if (channelReady && (process.env.CC_CHANNEL_MODE || 'persistent') !== 'oneshot' && process.env.CC_TTS_STUB !== '1') warmChannels();
+  bridging.prewarm();
+});
 
 // A single bad request must never take down the shared process (durable unattended hosting).
 process.on('uncaughtException', (err) => console.error('uncaughtException (server kept running):', err));

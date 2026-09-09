@@ -114,3 +114,18 @@ test('tts.mjs speaks over the held channel: one process, many clips, URL handed 
   assert.equal(st.spawns, 1, 'ONE process for three clips'); assert.equal(st.ok, 3);
   closeChannels();
 });
+
+test('warm() holds idle processes before any call, so the first call pays no spawn', async () => {
+  const c = new ChannelClient('t', { size: 2, command: fake('FAKE_DELAY_MS=10'), timeoutMs: 2000 });
+  try {
+    assert.equal(c.warm(1), 1);
+    await new Promise((r) => setTimeout(r, 150));
+    assert.equal(c.status().live, 1); assert.equal(c.status().calls, 0); assert.equal(c.status().spawns, 1);
+    const r = await c.call({ text: 'first' });
+    assert.ok(r && r.startsWith('echo#1:first'), r);
+    assert.equal(c.status().spawns, 1, 'the warm process served the first call');
+    assert.equal(c.warm(), 2, 'a full warm tops up to the pool size');
+    assert.equal(c.warm(), 2, 'and never beyond it');
+    assert.equal(c.status().spawns, 2);
+  } finally { c.close(); }
+});
