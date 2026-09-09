@@ -76,3 +76,11 @@ test('inviteText derives a closed question from a validated suggestion', () => {
   assert.ok(t.includes('wie hoch die Arbeitslosenquote in Lübeck ist'));
   assert.ok(/\?$|\.$/.test(t));
 });
+
+test('inviteText moves a "gibt es" to the end wherever it stood in the question', () => {
+  const t = bridging.inviteText('Wie viele Hausärzte gibt es je 100.000 Einwohner in Hamburg?', 'u7');
+  assert.ok(t.includes('wie viele Hausärzte je 100.000 Einwohner es in Hamburg gibt'), t);
+  assert.ok(!t.includes('gibt es je'), t);
+  const t2 = bridging.inviteText('Wie viele Ladepunkte gibt es in Kiel?', 'u7');
+  assert.ok(t2.includes('wie viele Ladepunkte es in Kiel gibt'), t2);
+});

@@ -58,7 +58,7 @@ test('FSM shape + describe() is serializable and lists every invariant', () => {
   for (const s of Object.values(FSM.states)) { assert.ok(s.pre && s.enter && s.leave && s.on, JSON.stringify(s)); for (const t of Object.values(s.on)) assert.ok(FSM.states[t], 'transition target exists: ' + t); }
   const d = JSON.parse(JSON.stringify(describe()));
   assert.equal(d.invariants.length, INVARIANTS.length);
-  assert.equal(d.invariants.length, 11);
+  assert.equal(d.invariants.length, 12);
 });
 
 test('I11: a bare "Ja" to an open follow-up offer resolves to the offered question; anything else does not', () => {

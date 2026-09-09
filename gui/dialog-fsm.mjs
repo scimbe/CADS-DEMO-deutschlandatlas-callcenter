@@ -163,6 +163,7 @@ export const INVARIANTS = [
   'I9 answer TTS is high priority; all bridging TTS is low priority; every LLM/pipeline/TTS call retries transient failures',
   'I10 every spoken string passes the same sanitizer (IPA, gender notation) exactly once, inside ttsSpeak',
   'I11 a bare spoken "Ja" while a follow-up offer is open IS the offered question: it is asked as a continuation without an LLM round trip; a qualified yes goes to the LLM with the offer in its context',
+  'I12 fillers are never back-to-back: after a spoken filler clip there is a pause (7 s) of silence before the next one is requested; the answer ends the pause at once (I2); only the short VERSTEHEN echo follows the opener without a pause',
 ];
 
 /** A compact, serializable view for GET /fsm and the n8n mirror. */

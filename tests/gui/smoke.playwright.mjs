@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Browser smoke test of the whole dialogue against a running server (normally in stub mode):
 //
-//   CC_STUB=1 CC_TTS_STUB=1 CC_STUB_ANSWER_MS=16000 PORT=8799 node gui/server.mjs &
+//   CC_STUB=1 CC_TTS_STUB=1 CC_STUB_ANSWER_MS=16000 CC_BRIDGE_PAUSE_MS=1000 PORT=8799 node gui/server.mjs &
+//   (CC_BRIDGE_PAUSE_MS shortens the I12 filler pause from 7 s so the fact bridge is reached within the stub answer time)
 //   NODE_PATH=<dir containing node_modules/playwright> node tests/gui/smoke.playwright.mjs http://127.0.0.1:8799
 //
 // It drives three turns (typed question → "✓ Ja" follow-up → a new topic), records every
