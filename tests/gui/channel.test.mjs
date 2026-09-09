@@ -114,3 +114,27 @@ test('tts.mjs speaks over the held channel: one process, many clips, URL handed 
   assert.equal(st.spawns, 1, 'ONE process for three clips'); assert.equal(st.ok, 3);
   closeChannels();
 });
+
+test('warm() holds idle processes before any call, so the first call pays no spawn', async () => {
+  const c = new ChannelClient('t', { size: 2, command: fake('FAKE_DELAY_MS=10'), timeoutMs: 2000 });
+  try {
+    assert.equal(c.warm(1), 1);
+    await new Promise((r) => setTimeout(r, 150));
+    assert.equal(c.status().live, 1); assert.equal(c.status().calls, 0); assert.equal(c.status().spawns, 1);
+    const r = await c.call({ text: 'first' });
+    assert.ok(r && r.startsWith('echo#1:first'), r);
+    assert.equal(c.status().spawns, 1, 'the warm process served the first call');
+    assert.equal(c.warm(), 2, 'a full warm tops up to the pool size');
+    assert.equal(c.warm(), 2, 'and never beyond it');
+    assert.equal(c.status().spawns, 2);
+  } finally { c.close(); }
+});
+
+test('silentWav builds a valid 16-bit mono PCM WAV of the requested length', async () => {
+  const { silentWav } = await import('../../gui/lib/stt.mjs');
+  const b = silentWav(16000, 0.5);
+  assert.equal(b.toString('ascii', 0, 4), 'RIFF'); assert.equal(b.toString('ascii', 8, 12), 'WAVE');
+  assert.equal(b.readUInt16LE(22), 1, 'mono'); assert.equal(b.readUInt32LE(24), 16000); assert.equal(b.readUInt16LE(34), 16);
+  assert.equal(b.readUInt32LE(40), 16000, '0.5 s of 16-bit samples'); assert.equal(b.length, 44 + 16000);
+  assert.ok(b.subarray(44).every((x) => x === 0), 'silence');
+});

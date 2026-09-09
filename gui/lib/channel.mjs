@@ -140,6 +140,15 @@ export class ChannelClient {
     this.lastError = why;
     this._pump();
   }
+  /** Spawn up to `n` idle processes now, so the first real call does not pay the join+pair
+   *  (~5-8 s measured live for the first dictation after a restart). No-op for workers already up. */
+  warm(n = this.size) {
+    const want = Math.min(this.size, n);
+    while (this.workers.size < want && Date.now() >= this.nextSpawnAt) {
+      const w = new Worker(this, ++this.seq); this.workers.add(w); this.stats.spawns++;
+    }
+    return this.workers.size;
+  }
   /** Close every held process (stdin EOF = clean teardown, then SIGKILL as a backstop). */
   close() {
     for (const w of this.workers) w.kill();
@@ -162,4 +171,9 @@ export function channelFor(service, size = 1) {
   return clients.get(service);
 }
 export const channelStats = () => [...clients.values()].map((c) => c.status());
+/** Hold the STT and TTS processes from the start (called once the relay env is known to be set). */
+export function warmChannels() {
+  channelFor('audio_generation', Number(process.env.CC_CHANNEL_CONCURRENCY) || 1).warm();
+  channelFor('speech_to_text', 2).warm(1);
+}
 export function closeChannels() { for (const c of clients.values()) c.close(); clients.clear(); }

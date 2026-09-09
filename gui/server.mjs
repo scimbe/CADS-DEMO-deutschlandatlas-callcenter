@@ -29,8 +29,8 @@ import { describe as describeFsm, openerKind, OPENER_KIND, BRIDGE_KIND } from '.
 import { userKeyFor } from './lib/limiter.mjs';
 import { placeFromQuery, swapCityFollowups } from './lib/text.mjs';
 import { ttsSpeak, proxied, TTS_DIR, streamClips, limiterStats, protectClip, unprotectClip } from './lib/tts.mjs';
-import { transcribe, sttBlobPath } from './lib/stt.mjs';
-import { channelStats, closeChannels } from './lib/channel.mjs';
+import { transcribe, sttBlobPath, silentWav } from './lib/stt.mjs';
+import { channelStats, closeChannels, warmChannels } from './lib/channel.mjs';
 import { catalogSummary, understand, followupSuggestions, STUB } from './lib/llm.mjs';
 import { configurePipeline, answerFor, hasRealData, validateSuggestions, poolSuggestions, trace, traceLines, pipelineStats } from './lib/pipeline.mjs';
 import * as bridging from './lib/bridging.mjs';
@@ -276,7 +276,29 @@ async function handle(req, res) {
 let shuttingDown = false;
 const server = createServer((req, res) => { handle(req, res).catch((e) => { console.error('route error', req.url, e); try { if (!res.headersSent) res.writeHead(500); res.end('error'); } catch {} }); });
 const HOST = process.env.CC_HOST || '127.0.0.1';
-server.listen(PORT, HOST, () => { console.log(`callcenter GUI on http://${HOST}:${PORT}${STUB ? ' (STUB mode)' : ''}`); bridging.prewarm(); });
+server.listen(PORT, HOST, () => {
+  console.log(`callcenter GUI on http://${HOST}:${PORT}${STUB ? ' (STUB mode)' : ''}`);
+  // Hold the channel processes from the start: the first dictation after a restart otherwise pays
+  // the join+pair itself (8.7 s measured live, against 1.7-2.0 s for every call after it).
+  const channelReady = process.env.CT_AGENT_BIN && process.env.CT_RELAY_ENV && process.env.CT_AUDIO_CHANNEL_ID;
+  if (channelReady && (process.env.CC_CHANNEL_MODE || 'persistent') !== 'oneshot' && process.env.CC_TTS_STUB !== '1') { warmChannels(); probeChannels(); }
+  bridging.prewarm();
+});
+
+// scimbe: a pseudo request at start. Holding the processes covers the join+pair; this exercises the
+// whole chain once (first synthesis, first transcription incl. ffmpeg and the audio hand-over to
+// llm2) in the background, so the first real caller pays none of it. STT needs our public base URL
+// (llm2 fetches the audio from us): CC_PUBLIC_BASE, else the STT probe is skipped.
+async function probeChannels() {
+  const t0 = Date.now();
+  try { const u = await ttsSpeak('Sprachausgabe bereit.', { priority: false, userKey: 'system' }); console.log(`[probe] tts ${Date.now() - t0}ms ${u ? 'ok' : 'no clip'}`); }
+  catch (e) { console.log('[probe] tts failed:', e && e.message); }
+  const base = (process.env.CC_PUBLIC_BASE || '').trim();
+  if (!/^https:\/\//.test(base)) { console.log('[probe] stt skipped (CC_PUBLIC_BASE not set)'); return; }
+  const t1 = Date.now();
+  try { const text = await transcribe(silentWav(16000, 0.6), base); console.log(`[probe] stt ${Date.now() - t1}ms "${text}"`); }
+  catch (e) { console.log('[probe] stt failed:', e && e.message); }
+}
 
 // A single bad request must never take down the shared process (durable unattended hosting).
 process.on('uncaughtException', (err) => console.error('uncaughtException (server kept running):', err));

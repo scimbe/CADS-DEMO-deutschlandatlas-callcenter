@@ -83,6 +83,17 @@ function sttChannelOneShot(audioUrl, lang = 'de') {
   });
 }
 
+/** A silent 16-bit PCM mono WAV of `seconds` at `rate` Hz — the payload of the start-up probe. */
+export function silentWav(rate = 16000, seconds = 0.6) {
+  const n = Math.round(rate * seconds), data = n * 2;
+  const b = Buffer.alloc(44 + data);
+  b.write('RIFF', 0); b.writeUInt32LE(36 + data, 4); b.write('WAVE', 8);
+  b.write('fmt ', 12); b.writeUInt32LE(16, 16); b.writeUInt16LE(1, 20); b.writeUInt16LE(1, 22);
+  b.writeUInt32LE(rate, 24); b.writeUInt32LE(rate * 2, 28); b.writeUInt16LE(2, 32); b.writeUInt16LE(16, 34);
+  b.write('data', 36); b.writeUInt32LE(data, 40);
+  return b;
+}
+
 /** Transcribe caller audio (any ffmpeg-readable format). publicBase = origin llm2 can fetch from. */
 export async function transcribe(buf, publicBase) {
   if (!buf || !buf.length) return '';
