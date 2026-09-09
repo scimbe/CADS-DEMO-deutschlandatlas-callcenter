@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { makeLimiter } from './limiter.mjs';
 import { ttsSafe } from './text.mjs';
+import { channelFor, channelCommand } from './channel.mjs';
 
 export const TTS_DIR = join(tmpdir(), 'cc-tts');
 let ttsSeq = 0;
@@ -107,15 +108,23 @@ function ttsLocalPiper(text, priority, userKey) {
 
 // One audio_generation call over the channel. Resolves to an https clip URL or null. A channel
 // call must never hang a turn: a timeout resolves null so the caller falls back to Piper.
-function ttsChannel(text, voice = 'primary') {
+// Default: over the HELD channel process (persistent call mode, channel.mjs): one paired session
+// per process life instead of a ~5.5 s join+pair+Noise per clip — the difference between an invite
+// or clarify question that is spoken and one that arrives after the caller has moved on.
+// CC_CHANNEL_MODE=oneshot keeps the spawn-per-call path.
+async function ttsChannel(text, voice = 'primary') {
+  if ((process.env.CC_CHANNEL_MODE || 'persistent') !== 'oneshot') {
+    const out = await channelFor('audio_generation', Number(process.env.CC_CHANNEL_CONCURRENCY) || 1)
+      .call({ text, voice }, Number(process.env.CC_CHANNEL_TIMEOUT_MS) || 8000);
+    const url = (out || '').trim().split('\n').pop() || '';
+    return /^https:\/\//.test(url.trim()) ? url.trim() : null;
+  }
+  return ttsChannelOneShot(text, voice);
+}
+function ttsChannelOneShot(text, voice = 'primary') {
   return new Promise((resolve) => {
     const payload = JSON.stringify({ text, voice });
-    const p = spawn('bash', ['-c',
-      `set -a; source "$CT_RELAY_ENV"; set +a; printf '%s' '${payload.replace(/'/g, "'\\''")}' | ` +
-      `CT_CHANNEL_ROLE=initiate CT_CHANNEL_CALL_SERVICE=audio_generation CT_CHANNEL_CALL_PERSISTENT=${process.env.CC_CALL_PERSISTENT || '0'} CT_CHANNEL_RELAY_ONLY=1 ` +
-      `CT_CHANNEL_ID="${process.env.CT_AUDIO_CHANNEL_ID}" CT_CHANNEL_GRANT="$CT_CHANNEL_GRANT_2E" CT_CHANNEL_HOLDER_KEY="$CT_CHANNEL_HOLDER_KEY" CT_CHANNEL_NOISE_KEY="$CT_CHANNEL_NOISE_KEY" ` +
-      `CT_CHANNEL_FRONT_DOOR=bunsenbrenner.org:443 CT_CHANNEL_FRONT_DOOR_CERT="$CT_CHANNEL_FRONT_DOOR_CERT" CT_CHANNEL_FRONT_DOOR_ONLY=1 ` +
-      `CT_CHANNEL_BROKER=bunsenbrenner.org:4435 CT_CHANNEL_RELAY=bunsenbrenner.org:4436 "$CT_AGENT_BIN" channel 2>/dev/null`],
+    const p = spawn('bash', ['-c', `printf '%s' '${payload.replace(/'/g, "'\\''")}' | ` + channelCommand('audio_generation', { persistent: false })],
       { env: process.env, detached: true });
     let out = '', done = false;
     const finish = (url) => { if (done) return; done = true; clearTimeout(timer); try { process.kill(-p.pid, 'SIGKILL'); } catch {} resolve(url); };

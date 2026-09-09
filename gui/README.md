@@ -10,6 +10,14 @@ natural dialogue.
 export LITELLM_BASE_URL=... LITELLM_API_KEY=... LITELLM_DEFAULT_MODEL=local-devstral-small2
 # spoken dialogue: the llm2 audio_generation channel (primary) and/or local Piper (fallback)
 export CC_TTS=1 CT_AGENT_BIN=/path/to/ct-agent CT_RELAY_ENV=/path/to/channel.env CT_AUDIO_CHANNEL_ID=<id>
+# Channel calls (audio_generation, speech_to_text) run over HELD `ct-agent channel` processes in
+# persistent call mode (one paired session per process life, one NDJSON envelope per call) — the
+# ~5.5 s join+pair+Noise per call of the old spawn-per-call path is gone. Knobs:
+#   CC_CHANNEL_MODE=oneshot            back to spawn-per-call (a host with a pre-0.5.0 ct-agent)
+#   CC_CHANNEL_POOL_AUDIO_GENERATION   held processes for TTS (default CC_CHANNEL_CONCURRENCY or 1)
+#   CC_CHANNEL_POOL_SPEECH_TO_TEXT     held processes for STT (default 2: interim + final)
+#   CC_CHANNEL_TIMEOUT_MS              per-call timeout (default 30000; TTS uses 8000)
+# /health lists the held processes under limiters.channels; /trace shows "stt" rows with ms.
 export CC_PIPER_BIN=/opt/piper/piper CC_PIPER_MODEL=voices/de_DE-thorsten-medium.onnx
 node gui/server.mjs   # http://127.0.0.1:8791
 ```

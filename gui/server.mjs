@@ -30,6 +30,7 @@ import { userKeyFor } from './lib/limiter.mjs';
 import { placeFromQuery, swapCityFollowups } from './lib/text.mjs';
 import { ttsSpeak, proxied, TTS_DIR, streamClips, limiterStats, protectClip, unprotectClip } from './lib/tts.mjs';
 import { transcribe, sttBlobPath } from './lib/stt.mjs';
+import { channelStats, closeChannels } from './lib/channel.mjs';
 import { catalogSummary, understand, followupSuggestions, STUB } from './lib/llm.mjs';
 import { configurePipeline, answerFor, hasRealData, validateSuggestions, poolSuggestions, trace, traceLines, pipelineStats } from './lib/pipeline.mjs';
 import * as bridging from './lib/bridging.mjs';
@@ -200,7 +201,10 @@ async function handle(req, res) {
     const chunks = [];
     for await (const c of req) chunks.push(c);
     const base = process.env.CC_PUBLIC_BASE || (req.headers.host ? 'https://' + req.headers.host : null);
-    return jsonRes(res, 200, { text: await transcribe(Buffer.concat(chunks), base) });
+    const t0 = Date.now(); const buf = Buffer.concat(chunks);
+    const text = await transcribe(buf, base);
+    trace('stt', { ms: Date.now() - t0, bytes: buf.length, chars: text.length, mode: process.env.CC_CHANNEL_MODE || 'persistent' });
+    return jsonRes(res, 200, { text });
   }
 
   if (req.method === 'GET' && /^\/tts\/[\w.-]+\.wav$/.test(url)) {
@@ -256,7 +260,7 @@ async function handle(req, res) {
     return jsonRes(res, 200, { status: 'ok', uptime_s: Math.round(process.uptime()), pid: process.pid, stub: STUB, pools: bridging.poolStats(), facts: bridging.factStats() });
   }
   if (req.method === 'GET' && url === '/ready') {
-    const limiters = { pipeline: pipelineStats(), ...limiterStats() };
+    const limiters = { pipeline: pipelineStats(), ...limiterStats(), channels: channelStats() };
     const saturated = Object.values(limiters).some((s) => s.hiQueued >= s.hiQueueMax || s.loQueued >= s.loQueueMax);
     const ready = !shuttingDown && !saturated;
     return jsonRes(res, ready ? 200 : 503, { ready, shutting_down: shuttingDown, limiters });
@@ -285,7 +289,7 @@ function gracefulShutdown(signal) {
   shuttingDown = true;
   const drainDelayMs = Number(process.env.CC_DRAIN_DELAY_MS) || 3000;
   console.log(`${signal} received — /ready now 503; closing the listener in ${drainDelayMs}ms…`);
-  setTimeout(() => { server.close(() => { console.log('drained, exiting'); process.exit(0); }); }, drainDelayMs);
+  setTimeout(() => { server.close(() => { closeChannels(); console.log('drained, exiting'); process.exit(0); }); }, drainDelayMs);
   const t = setTimeout(() => { console.error('graceful shutdown timed out — forcing exit'); process.exit(1); }, drainDelayMs + (Number(process.env.CC_SHUTDOWN_TIMEOUT_MS) || 15000));
   if (t.unref) t.unref();
 }
