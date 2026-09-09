@@ -183,13 +183,19 @@ export async function understand(query, context, CATALOG_SUMMARY = '') {
     u = await llmJSON(UNDERSTAND_SYS + catalog, memoryBlock(context) + offer + 'Neue Eingabe: ' + query);
     kind = (u.kind === 'anschluss' || u.kind === 'neu') ? u.kind : 'neu';
   }
+  const slots = normSlots(u.slots);
+  // Both slots resolved => a complete, answerable question, even if the model forgot to also
+  // flip its own "precise" boolean (observed live with Cloudflare's small instruct model on
+  // "anschluss" turns: it resolves ort+indikator correctly into slots/best_guess but leaves
+  // precise:false) — matches stubUnderstand()'s own definition of precise below.
+  const precise = !!u.precise || !!(slots.ort && slots.indikator);
   return {
     kind,
-    precise: !!u.precise,
-    clarify: (u.clarify || '').toString(),
+    precise,
+    clarify: precise ? '' : (u.clarify || '').toString(),
     best_guess: (u.best_guess || query).toString(),
     options: Array.isArray(u.options) ? u.options.filter((x) => typeof x === 'string').slice(0, 3) : [],
-    slots: normSlots(u.slots),
+    slots,
   };
 }
 

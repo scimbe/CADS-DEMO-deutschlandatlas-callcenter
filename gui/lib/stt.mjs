@@ -100,8 +100,12 @@ export function silentWav(rate = 16000, seconds = 0.6) {
 export async function transcribe(buf, publicBase) {
   if (!buf || !buf.length) return '';
   if (STT_PROVIDER === 'cloudflare') {
-    const wav16 = await toWav16k(buf);
-    const t = wav16 ? await cloudflare.transcribe(wav16) : '';
+    // No 16kHz pre-conversion here (unlike the channel path below, which specifically needs it) --
+    // verified live 2026-09-09: Cloudflare's Whisper transcribes the caller's ORIGINAL format
+    // directly; running it through toWav16k first produced empty transcripts instead (the 16kHz
+    // mono re-encode this ffmpeg pass produces apparently isn't something this model likes, and
+    // there's no reason to pay the extra conversion when the raw buffer already works).
+    const t = await cloudflare.transcribe(buf);
     return t || transcribeLocal(buf);   // never silent: fall back to local whisper.cpp on any Cloudflare failure
   }
   const channelReady = process.env.CC_STT_CHANNEL === '1' && process.env.CT_AGENT_BIN && process.env.CT_RELAY_ENV && process.env.CT_AUDIO_CHANNEL_ID && publicBase;

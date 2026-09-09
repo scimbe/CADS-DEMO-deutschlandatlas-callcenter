@@ -16,11 +16,10 @@
 // Wire-format note: the LLM call uses Cloudflare's OpenAI-COMPATIBLE endpoint (documented at
 // https://developers.cloudflare.com/workers-ai/configuration/open-ai-compatibility/), so it reuses
 // the exact same request body llm.mjs already builds for litellm — only base URL/auth/model
-// differ. The STT/TTS wire formats are documented less precisely at the time of writing (input/
-// output encoding varies by model); both functions below try the most likely shape first and a
-// documented fallback second. VERIFY against your own account with a real request once credentials
-// are in place (e.g. `node -e` a one-off call, or just try dictation/an answer live) and simplify
-// to whichever branch actually fires if the other never does.
+// differ. LLM/STT/TTS wire formats below are all VERIFIED against a real account (2026-09-09,
+// curl + the model-search endpoint) — see each function's own comment for the specifics that
+// weren't obvious from the docs alone (STT: raw binary body works as documented; TTS: needed the
+// "-ai" in the model id and a `prompt` field, not `text`, neither of which the docs stated plainly).
 const ACCOUNT_ID = process.env.CLOUDFLARE_ACCOUNT_ID;
 const API_TOKEN = process.env.CLOUDFLARE_API_TOKEN;
 const BASE = ACCOUNT_ID ? `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/ai` : null;
@@ -39,14 +38,22 @@ function authHeaders(extra = {}) {
 export const LLM_MODEL = process.env.CLOUDFLARE_LLM_MODEL || '@cf/meta/llama-3.1-8b-instruct-fast';
 
 /** Same shape as llm.mjs's internal chat(body): body = { messages, temperature, max_tokens,
- *  response_format? }. Returns the assistant message text, or null on any failure. */
+ *  response_format? }. Returns the assistant message text, or null on any failure.
+ *
+ *  frequency_penalty/presence_penalty defaults: VERIFIED live 2026-09-09 that without these,
+ *  this model (llama-3.1-8b-instruct-fast) reliably degenerates into an infinite repetition loop
+ *  while filling the understand() JSON's "options" array — e.g. the same question re-worded
+ *  dozens of times back to back — and runs into max_tokens (finish_reason:"length") before ever
+ *  emitting the rest of the JSON object (so it comes back truncated/unparseable, silently
+ *  producing an empty {} classification upstream). A penalty of just 0.2 already fixed it in
+ *  testing; 0.3 is used here for margin. Spread after these so a caller-supplied value still wins. */
 export async function chat(body) {
   if (!ready()) return null;
   try {
     const resp = await fetch(`${BASE}/v1/chat/completions`, {
       method: 'POST',
       headers: authHeaders({ 'content-type': 'application/json' }),
-      body: JSON.stringify({ model: LLM_MODEL, ...body }),
+      body: JSON.stringify({ model: LLM_MODEL, frequency_penalty: 0.3, presence_penalty: 0.3, ...body }),
     });
     if (!resp.ok) return null;
     const j = await resp.json();
@@ -83,9 +90,13 @@ export async function transcribe(buf) {
 
 // --- Text-to-speech ------------------------------------------------------------------------------
 // MeloTTS: the only Workers AI TTS model with an explicit German-capable multi-lingual mode at the
-// time of writing (Aura is English-only). Confirm your account still shows this before relying on it
-// — Workers AI's audio-generation catalog has changed shape before.
-export const TTS_MODEL = process.env.CLOUDFLARE_TTS_MODEL || '@cf/myshell/melotts';
+// time of writing (Aura is English-only, and Aura-2 is billed separately from the free neuron
+// allowance — "partner" pricing per 1k characters, not covered by "ausschliesslich free plan").
+// VERIFIED against a real account 2026-09-09: model id needs the "-ai" (myshell-AI, not myshell),
+// the request field is `prompt` (not `text`), and the response is always JSON with a base64 WAV
+// in result.audio (never a raw audio/* response) — see the two-branch handling below, kept for the
+// (documented-but-unobserved) case a future model returns audio bytes directly.
+export const TTS_MODEL = process.env.CLOUDFLARE_TTS_MODEL || '@cf/myshell-ai/melotts';
 
 /** Returns a Buffer of audio bytes, or null on any failure. */
 export async function synthesize(text) {
@@ -93,7 +104,7 @@ export async function synthesize(text) {
   try {
     const resp = await fetch(`${BASE}/run/${TTS_MODEL}`, {
       method: 'POST', headers: authHeaders({ 'content-type': 'application/json' }),
-      body: JSON.stringify({ text, lang: 'de' }),
+      body: JSON.stringify({ prompt: text, lang: 'de' }),
     });
     if (!resp.ok) return null;
     const ct = resp.headers.get('content-type') || '';
