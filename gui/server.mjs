@@ -17,7 +17,11 @@
 //                                           for the suggested places in the background
 //   POST /stt        (audio body)        -> {text}
 //   GET  /, /dialog-fsm.mjs, /dialog-client.mjs, /tts/<id>.wav, /tts-stream/<id>, /stt-blob/<id>.wav,
-//        /audio?u=, /debug/trace, /health, /ready, /fsm
+//        /audio?u=, /debug/trace, /health, /ready, /fsm, /providers, /admin (dropdown page)
+//   GET/POST /admin/providers {llm?,tts?,stt?} -> runtime provider switch, no restart needed;
+//        requires header x-admin-token == env ADMIN_TOKEN (404 if that's unset — disabled by
+//        default). POST triggers bridging.onProviderChanged() to keep spoken DSGVO/privacy texts
+//        and prepared-clip pools truthful for the new choice.
 //
 // Env: PORT (8791), CC_HOST; LITELLM_*; CC_TTS=1 + channel/Piper vars (see lib/tts.mjs);
 //      CC_STUB=1 + CC_TTS_STUB=1 run the whole dialogue offline (tests / demo without a proxy).
@@ -38,7 +42,8 @@ import { channelStats, closeChannels, warmChannels } from './lib/channel.mjs';
 import { catalogSummary, understand, followupSuggestions, STUB } from './lib/llm.mjs';
 import { configurePipeline, answerFor, hasRealData, validateSuggestions, poolSuggestions, trace, traceLines, pipelineStats } from './lib/pipeline.mjs';
 import * as bridging from './lib/bridging.mjs';
-import { providerSummary } from './lib/providers/config.mjs';
+import { timingSafeEqual } from 'node:crypto';
+import { providerSummary, setProvider } from './lib/providers/config.mjs';
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dir, '..');
@@ -50,6 +55,18 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function readBody(req) { let b = ''; for await (const c of req) b += c; try { return JSON.parse(b); } catch { return {}; } }
 const jsonRes = (res, code, obj) => { res.writeHead(code, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }); res.end(JSON.stringify(obj)); };
 const str = (v, max = 300) => (v == null ? '' : String(v)).slice(0, max);
+
+// Admin auth for the runtime provider switch: a shared secret in ADMIN_TOKEN, compared
+// constant-time. Unset ADMIN_TOKEN disables /admin entirely (404) rather than leaving a control
+// that changes where real callers' voice data goes — and the DSGVO-relevant banner state —
+// reachable by any visitor. See deploy/.env.template.
+function adminAuthorized(req) {
+  const configured = process.env.ADMIN_TOKEN;
+  if (!configured) return false;
+  const given = req.headers['x-admin-token'];
+  if (!given || given.length !== configured.length) return false;
+  try { return timingSafeEqual(Buffer.from(given), Buffer.from(configured)); } catch { return false; }
+}
 
 // Prepared invites: the first "same question, other city" follow-up is known at /understand, so its
 // invite ("Bleiben wir gleich dran: soll ich Ihnen auch sagen, …?") is rendered and spoken (low
@@ -93,6 +110,16 @@ async function handle(req, res) {
   if (req.method === 'GET' && (url === '/dialog-fsm.mjs' || url === '/dialog-client.mjs')) {
     try { const js = await readFile(join(__dir, url.slice(1)), 'utf8'); res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'no-store' }); res.end(js); }
     catch { res.writeHead(404); res.end('missing'); }
+    return;
+  }
+  if (req.method === 'GET' && url === '/admin') {
+    // Not itself secret (it's just the dropdown form) — every action it triggers requires
+    // ADMIN_TOKEN via adminAuthorized(); unset ADMIN_TOKEN disables the underlying API, not this
+    // static page, so the page still loads and explains that clearly.
+    try {
+      const html = await readFile(join(__dir, 'admin.html'), 'utf8');
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' }); res.end(html);
+    } catch { res.writeHead(404); res.end('admin.html missing'); }
     return;
   }
 
@@ -268,6 +295,25 @@ async function handle(req, res) {
     // Same info as /health's "providers" field, as its own tiny endpoint so the GUI can poll just
     // this (e.g. to render the GDPR banner) without depending on /health's shape.
     return jsonRes(res, 200, providerSummary());
+  }
+  if (url === '/admin/providers') {
+    if (!process.env.ADMIN_TOKEN) return jsonRes(res, 404, { error: 'not found' });
+    if (!adminAuthorized(req)) return jsonRes(res, 401, { error: 'unauthorized' });
+    if (req.method === 'GET') return jsonRes(res, 200, providerSummary());
+    if (req.method === 'POST') {
+      const b = await readBody(req);
+      const results = {};
+      for (const svc of ['llm', 'tts', 'stt']) {
+        if (b[svc] == null) continue;
+        results[svc] = setProvider(svc, b[svc]);
+        if (!results[svc].ok) return jsonRes(res, 400, { error: results[svc].error, results });
+      }
+      if (!Object.keys(results).length) return jsonRes(res, 400, { error: 'no llm/tts/stt field given' });
+      const ttsChanged = !!(results.tts && results.tts.changed);
+      await bridging.onProviderChanged({ ttsChanged });
+      return jsonRes(res, 200, { results, summary: providerSummary() });
+    }
+    return jsonRes(res, 405, { error: 'method not allowed' });
   }
   if (req.method === 'GET' && url === '/ready') {
     const limiters = { pipeline: pipelineStats(), ...limiterStats(), channels: channelStats() };

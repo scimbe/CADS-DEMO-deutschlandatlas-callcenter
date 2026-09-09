@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Callcenter Admin — AI-Provider</title>
+<style>
+  :root{--bg:#0C121F;--panel:#0F1725;--line:rgba(255,255,255,.08);--ink:#EAF0F7;--dim:#93A2B9;
+    --teal:#35C2A8;--amber:#E4B24A;--red:#EA6A6A;--input-bg:#0b1220;}
+  @media (prefers-color-scheme:light){:root{
+    --bg:#f5f7fb;--panel:#ffffff;--line:rgba(19,26,44,.12);--ink:#131a2c;--dim:#5b6478;
+    --teal:#2f8a7d;--amber:#b0832a;--red:#d0483f;--input-bg:#ffffff;}}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:system-ui,sans-serif;line-height:1.5}
+  .wrap{max-width:560px;margin:0 auto;padding:32px 20px 60px}
+  h1{font-size:1.3rem;margin:0 0 .2em}
+  .sub{color:var(--dim);font-size:.9rem;margin:0 0 24px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px 20px;margin-bottom:16px}
+  label{display:block;font-size:.85rem;color:var(--dim);margin:0 0 6px}
+  input,select{width:100%;padding:9px 10px;border-radius:8px;border:1px solid var(--line);background:var(--input-bg);color:var(--ink);font-size:.95rem;margin-bottom:14px}
+  select:disabled{opacity:.5}
+  button{padding:10px 16px;border-radius:8px;border:1px solid var(--teal);background:var(--teal);color:#04231d;font-weight:600;cursor:pointer;font-size:.95rem}
+  button:disabled{opacity:.5;cursor:default}
+  button.ghost{background:transparent;color:var(--ink);border-color:var(--line)}
+  .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+  .status{font-size:.85rem;margin-top:10px;white-space:pre-wrap}
+  .status.err{color:var(--red)}
+  .status.ok{color:var(--teal)}
+  .warn{border-color:rgba(228,178,74,.4);background:rgba(228,178,74,.08);font-size:.85rem}
+  .noteEnd{font-size:.78rem;color:var(--dim);margin-top:28px}
+  code{background:rgba(255,255,255,.08);padding:.1em .4em;border-radius:4px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>AI-Provider — Callcenter</h1>
+  <p class="sub">Schaltet LLM/TTS/STT zur Laufzeit zwischen dem lokalen (EU-gehosteten) Setup und Cloudflare Workers AI um — ohne Neustart. Gilt nur für diesen laufenden Prozess (kein Neustart-übergreifendes Speichern).</p>
+
+  <div class="card">
+    <label for="token">Admin-Token (x-admin-token)</label>
+    <input id="token" type="password" autocomplete="off" placeholder="wird nur lokal im Browser gespeichert">
+    <div class="row"><button id="loadBtn">Status laden</button><span id="loadStatus" class="status"></span></div>
+  </div>
+
+  <div class="card" id="switchCard" hidden>
+    <div id="fields"></div>
+    <div class="row"><button id="applyBtn">Übernehmen</button><button class="ghost" id="reloadBtn" type="button">Neu laden</button></div>
+    <div id="applyStatus" class="status"></div>
+  </div>
+
+  <div class="card warn" id="warnCard" hidden>
+    ⚠ Sobald irgendein Dienst auf Cloudflare läuft, ist die Demo NICHT mehr DSGVO-konform (Daten
+    verlassen die EU) — der Hinweis-Banner auf der Startseite und die entsprechenden Ansagen
+    schalten sich automatisch dazu.
+  </div>
+
+  <p class="noteEnd">Persistenz: nur im laufenden Prozess (RAM). Ein Container-Neustart springt zurück auf die
+  <code>AI_PROVIDER</code>/<code>LLM_PROVIDER</code>/<code>TTS_PROVIDER</code>/<code>STT_PROVIDER</code>-Env-Vars.
+  Diese Seite selbst ist nicht geheim — jede Änderung erfordert weiterhin das Admin-Token
+  (<code>ADMIN_TOKEN</code> serverseitig gesetzt).</p>
+</div>
+<script>
+(function(){
+  const TOKEN_KEY = 'cc_admin_token';
+  const tokenEl = document.getElementById('token');
+  const loadBtn = document.getElementById('loadBtn');
+  const reloadBtn = document.getElementById('reloadBtn');
+  const applyBtn = document.getElementById('applyBtn');
+  const loadStatus = document.getElementById('loadStatus');
+  const applyStatus = document.getElementById('applyStatus');
+  const switchCard = document.getElementById('switchCard');
+  const warnCard = document.getElementById('warnCard');
+  const fields = document.getElementById('fields');
+  const SERVICES = [['llm','LLM'],['tts','Sprachausgabe (TTS)'],['stt','Spracherkennung (STT)']];
+  let current = null;
+
+  try { tokenEl.value = localStorage.getItem(TOKEN_KEY) || ''; } catch(e){}
+
+  function renderFields(summary){
+    current = summary;
+    fields.innerHTML = '';
+    SERVICES.forEach(([key,label])=>{
+      const wrap = document.createElement('div');
+      const l = document.createElement('label'); l.textContent = label; l.htmlFor = 'sel_'+key;
+      const sel = document.createElement('select'); sel.id = 'sel_'+key;
+      ['local','cloudflare'].forEach(v=>{ const o=document.createElement('option'); o.value=v; o.textContent = v==='local'?'Lokal (EU, DSGVO-konform)':'Cloudflare Workers AI (nicht EU)'; if(summary[key]===v) o.selected=true; sel.appendChild(o); });
+      wrap.appendChild(l); wrap.appendChild(sel); fields.appendChild(wrap);
+    });
+    warnCard.hidden = !summary.gdprNotice;
+    switchCard.hidden = false;
+  }
+
+  async function callApi(method, body){
+    const token = tokenEl.value.trim();
+    try { localStorage.setItem(TOKEN_KEY, token); } catch(e){}
+    const resp = await fetch('/admin/providers', {
+      method,
+      headers: Object.assign({'content-type':'application/json'}, token ? {'x-admin-token': token} : {}),
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    let j = null; try { j = await resp.json(); } catch(e){}
+    return { ok: resp.ok, status: resp.status, body: j };
+  }
+
+  async function load(){
+    loadStatus.textContent = 'Lade …'; loadStatus.className = 'status';
+    const r = await callApi('GET');
+    if (r.status === 404) { loadStatus.textContent = 'Admin-Endpoint ist deaktiviert (ADMIN_TOKEN ist serverseitig nicht gesetzt).'; loadStatus.className = 'status err'; switchCard.hidden = true; return; }
+    if (r.status === 401) { loadStatus.textContent = 'Falsches oder fehlendes Admin-Token.'; loadStatus.className = 'status err'; switchCard.hidden = true; return; }
+    if (!r.ok || !r.body) { loadStatus.textContent = 'Fehler beim Laden.'; loadStatus.className = 'status err'; return; }
+    loadStatus.textContent = 'Aktueller Stand geladen.'; loadStatus.className = 'status ok';
+    renderFields(r.body);
+  }
+
+  async function apply(){
+    const body = {};
+    SERVICES.forEach(([key])=>{ const v = document.getElementById('sel_'+key).value; if (!current || current[key] !== v) body[key] = v; });
+    if (!Object.keys(body).length) { applyStatus.textContent = 'Keine Änderung ausgewählt.'; applyStatus.className = 'status'; return; }
+    const switchingToCloudflare = Object.values(body).includes('cloudflare');
+    if (switchingToCloudflare && !confirm('Achtung: das schaltet echten Live-Verkehr auf Cloudflare Workers AI (nicht EU-gehostet, nicht DSGVO-konform) um. Fortfahren?')) return;
+    applyBtn.disabled = true; applyStatus.textContent = 'Wende an …'; applyStatus.className = 'status';
+    const r = await callApi('POST', body);
+    applyBtn.disabled = false;
+    if (r.status === 404) { applyStatus.textContent = 'Admin-Endpoint ist deaktiviert (ADMIN_TOKEN ist serverseitig nicht gesetzt).'; applyStatus.className = 'status err'; return; }
+    if (r.status === 401) { applyStatus.textContent = 'Falsches oder fehlendes Admin-Token.'; applyStatus.className = 'status err'; return; }
+    if (!r.ok || !r.body) { applyStatus.textContent = 'Fehler: ' + (r.body && r.body.error || r.status); applyStatus.className = 'status err'; return; }
+    applyStatus.textContent = 'Übernommen: ' + JSON.stringify(r.body.summary); applyStatus.className = 'status ok';
+    renderFields(r.body.summary);
+  }
+
+  loadBtn.onclick = load;
+  reloadBtn.onclick = load;
+  applyBtn.onclick = apply;
+})();
+</script>
+</body>
+</html>

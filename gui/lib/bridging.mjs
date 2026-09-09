@@ -18,6 +18,14 @@ import { narrate, wikiFunFact } from './llm.mjs';
 import { OPENER_KIND, BRIDGE_KIND } from '../dialog-fsm.mjs';
 import { usesNonEuProvider } from './providers/config.mjs';
 
+// Provider-dependent spoken lines: recomputed by onProviderChanged() (server.mjs, after an admin
+// POST /admin/providers switch) so a runtime switch doesn't leave a now-false claim ("DSGVO-konform
+// in Deutschland" / "niemand außer Ihnen liest mit") sitting in an already-warmed pool clip.
+const SERVICE_INTRO_EU = 'Schön, dass Sie da sind. Gut zu wissen: Ich laufe als Bunsenbrenner-Demo über einen abgesicherten Tunnel, und das Sprachmodell dahinter arbeitet DSGVO-konform in Deutschland.';
+const SERVICE_INTRO_NONEU = 'Schön, dass Sie da sind. Gut zu wissen: Ich laufe als Bunsenbrenner-Demo über einen abgesicherten Tunnel — welche KI-Dienste im Hintergrund laufen, sehen Sie im Hinweis am Seitenende.';
+const F1_PRIVACY_EU = 'Wussten Sie schon: die Regionaldaten laufen Ende-zu-Ende-verschlüsselt über den Tunnel, sodass niemand außer Ihnen die Frage mitliest.';
+const F1_PRIVACY_NONEU = 'Wussten Sie schon: Ihre Anfrage läuft verschlüsselt über den Tunnel zu unserem KI-Dienstleister, der sie zur Verarbeitung sieht — Details dazu im Hinweis am Seitenende.';
+
 // --- prepared pools (texts) ---------------------------------------------------------------------
 export const GREETINGS = [
   'Willkommen — schön, dass Sie da sind. Stellen Sie mir einfach Ihre Frage.',
@@ -26,16 +34,15 @@ export const GREETINGS = [
   'Willkommen. Ich bin bereit — nennen Sie mir einfach einen Ort und eine Kennzahl.',
   'Schön, dass Sie da sind. Fragen Sie mich gern etwas zu den Regionaldaten in Deutschland.',
 ];
-// The 2nd variant used to unconditionally claim "das Sprachmodell dahinter arbeitet DSGVO-konform
-// in Deutschland" — TRUE for the local provider (litellm-proxy + ct-agent, entirely EU-hosted),
-// FALSE the moment any service runs on Cloudflare Workers AI (see providers/config.mjs). Rather
-// than speak a false compliance claim ~1 turn in 6, swap it for a neutral variant whenever a
-// non-EU provider is active; the GUI banner (index.html) carries the actual disclosure.
+// The 2nd variant (and F1_FACTS' 3rd, below) used to unconditionally claim DSGVO-Konformität /
+// "niemand außer Ihnen liest mit" — TRUE for the local provider (litellm-proxy + ct-agent, entirely
+// EU-hosted), FALSE the moment any service runs on Cloudflare Workers AI (see providers/config.mjs).
+// Rather than speak a false claim ~1 turn in 6/8, swap it for a neutral variant whenever a non-EU
+// provider is active; the GUI banner (index.html) carries the actual disclosure. onProviderChanged()
+// below re-derives both and purges any already-warmed clip for the text that's no longer current.
 export const SERVICE_INTROS = [
   'Willkommen beim Deutschlandatlas-Sprach-Callcenter. Übrigens: dies ist eine Demo auf dem Bunsenbrenner-Marktplatz — jede Antwort ist auf echten, live abgefragten Zahlen geerdet, nichts wird erfunden.',
-  usesNonEuProvider
-    ? 'Schön, dass Sie da sind. Gut zu wissen: Ich laufe als Bunsenbrenner-Demo über einen abgesicherten Tunnel — welche KI-Dienste im Hintergrund laufen, sehen Sie im Hinweis am Seitenende.'
-    : 'Schön, dass Sie da sind. Gut zu wissen: Ich laufe als Bunsenbrenner-Demo über einen abgesicherten Tunnel, und das Sprachmodell dahinter arbeitet DSGVO-konform in Deutschland.',
+  usesNonEuProvider() ? SERVICE_INTRO_NONEU : SERVICE_INTRO_EU,
   'Hier spricht das Deutschlandatlas-Callcenter. Kleiner Hinweis vorweg: die Zahlen kommen direkt aus dem offiziellen Deutschlandatlas, und wenn ich zu etwas keine Daten habe, sage ich das ehrlich, statt zu raten.',
   'Guten Tag, willkommen beim Sprach-Callcenter zum Deutschlandatlas. Ein Tipp: Sie können mich ganz natürlich fragen, etwa nach der Arbeitslosenquote oder dem Ausländeranteil eines Ortes — ich sehe dann live in den echten Daten nach.',
   'Willkommen. Dies ist eine von mehreren Bunsenbrenner-Demos, die zeigen, wie sich KI faktentreu einsetzen lässt — hier für Regionaldaten aus dem Deutschlandatlas. Nennen Sie mir einfach einen Ort und eine Kennzahl.',
@@ -93,7 +100,7 @@ export const GAP_TEXTS = [
 export const F1_FACTS = [
   'Wussten Sie schon: der Deutschlandatlas bündelt über hundert Indikatoren zu ganz Deutschland, von Beschäftigung über Wohnen bis Infrastruktur.',
   'Wussten Sie schon: Ihre Werte kommen live aus dem echten Deutschlandatlas, nichts Vorgefertigtes, sondern der aktuelle Stand direkt aus der Quelle.',
-  'Wussten Sie schon: die Regionaldaten laufen Ende-zu-Ende-verschlüsselt über den Tunnel, sodass niemand außer Ihnen die Frage mitliest.',
+  usesNonEuProvider() ? F1_PRIVACY_NONEU : F1_PRIVACY_EU,
   'Wussten Sie schon: der Atlas deckt jeden Landkreis in Deutschland ab, deshalb gibt es für Ihren Ort einen ganz konkreten Wert.',
   'Wussten Sie schon: der Deutschlandatlas wird laufend aktualisiert, Sie bekommen also den aktuellen Stand und keine alte Momentaufnahme.',
   'Wussten Sie schon: für die meisten Kennzahlen reichen die Werte bis auf die Kreisebene hinunter.',
@@ -156,6 +163,41 @@ export async function prewarm({ onIncomplete } = {}) {
   }
 }
 export const poolStats = () => Object.fromEntries(Object.entries(pools).map(([k, v]) => [k, v.length]));
+
+/** Swap `arr[idx]` to `newText` in place (so POOL_TEXTS, which holds the SAME array reference,
+ *  sees it too) and drop the now-stale cached clip for the old text from whichever pool owns that
+ *  array, so a rotating caller can never be served the old — now false — claim again. No-op if the
+ *  text was already current. Returns whether it actually changed. */
+function swapPoolText(arr, idx, newText) {
+  const old = arr[idx];
+  if (old === newText) return false;
+  arr[idx] = newText;
+  for (const [name, texts] of Object.entries(POOL_TEXTS)) {
+    if (texts !== arr) continue;
+    const i = pools[name].findIndex((c) => c.text === old);
+    if (i !== -1) { const [removed] = pools[name].splice(i, 1); unprotectClip(removed.audioUrl); }
+  }
+  return true;
+}
+
+/** Call after config.setProvider() changes the active backend(s) (server.mjs's admin route). Two
+ *  jobs: (1) re-derive the DSGVO/privacy spoken lines for the now-current provider and purge any
+ *  stale cached clip for the text they replace, so a caller can never hear a compliance claim that
+ *  no longer holds; (2) if the TTS provider itself changed, drop every prepared pool clip so the
+ *  next prewarm() re-synthesizes with the new engine — otherwise callers would hear two different
+ *  synthetic voices mixed across a single call. Either way finishes by re-running prewarm(), which
+ *  is idempotent and only (re-)synthesizes what's actually missing. */
+export async function onProviderChanged({ ttsChanged = false } = {}) {
+  swapPoolText(SERVICE_INTROS, 1, usesNonEuProvider() ? SERVICE_INTRO_NONEU : SERVICE_INTRO_EU);
+  swapPoolText(F1_FACTS, 2, usesNonEuProvider() ? F1_PRIVACY_NONEU : F1_PRIVACY_EU);
+  if (ttsChanged) {
+    for (const name of Object.keys(pools)) {
+      for (const c of pools[name]) unprotectClip(c.audioUrl);
+      pools[name] = [];
+    }
+  }
+  await prewarm();
+}
 
 // --- small cache for dynamic, text-keyed clips (verstehen echoes, context bridges) --------------
 const dynCache = new Map();  // text -> { url: Promise<string|null>, ts }

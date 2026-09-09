@@ -115,17 +115,32 @@ CLOUDFLARE_ACCOUNT_ID=...
 CLOUDFLARE_API_TOKEN=...        # needs the "Workers AI" permission
 ```
 
-**GDPR/DSGVO**: switching ANY service to `cloudflare` makes the GUI show a banner (and swaps one
-spoken service-intro variant that used to claim EU-only processing) — Cloudflare Workers AI is a
-global network, not the EU-hosted guarantee the local setup was built on. `GET /providers` /
-`GET /health`'s `providers` field expose the active per-service state.
+**GDPR/DSGVO**: switching ANY service to `cloudflare` makes the GUI show a banner (and swaps two
+spoken lines that used to claim EU-only processing / "niemand außer Ihnen liest mit" — the service
+intro and one F1 fact) — Cloudflare Workers AI is a global network, not the EU-hosted guarantee the
+local setup was built on. `GET /providers` / `GET /health`'s `providers` field expose the active
+per-service state.
 
 Model defaults in `cloudflare.mjs` are chosen to fit inside Workers AI's free daily neuron
 allowance (usable on the Workers Free plan, no paid add-on) rather than the largest model in each
-category — override `CLOUDFLARE_{LLM,TTS,STT}_MODEL` if you need something bigger. The STT/TTS wire
-formats there are marked as needing verification against a real account (Cloudflare's docs were
-imprecise on binary in/out encoding at the time this was written) — the LLM path uses Cloudflare's
-documented OpenAI-compatible endpoint and needs no such caveat.
+category — override `CLOUDFLARE_{LLM,TTS,STT}_MODEL` if you need something bigger. LLM/STT/TTS wire
+formats are all live-verified against a real account (2026-09-09) — see the comments in
+`cloudflare.mjs` for the specifics the docs didn't state plainly (STT: raw binary body; TTS: the
+`-ai` in the model id and a `prompt` field, not `text`; LLM: `frequency_penalty`/`presence_penalty`
+are needed to stop this model degenerating into a repetition loop on JSON output).
+
+### Runtime switch (no restart)
+
+`AI_PROVIDER`/`LLM_PROVIDER`/`TTS_PROVIDER`/`STT_PROVIDER` are only the *startup* defaults.
+`GET /admin` serves a small token-gated dropdown page that flips any of the three live, via
+`GET`/`POST /admin/providers` (body `{llm?, tts?, stt?}`, each `"local"|"cloudflare"`). Both
+routes require an `x-admin-token` header matching `ADMIN_TOKEN`; leaving `ADMIN_TOKEN` unset
+disables them entirely (404) rather than exposing an unauthenticated control over where real
+callers' voice data goes. A successful switch calls `bridging.onProviderChanged()`, which re-derives
+the DSGVO/privacy-dependent spoken lines above (so a stale, now-false claim can't linger in an
+already-synthesized cached clip) and, if the TTS provider itself changed, purges and re-warms every
+prepared-audio pool so callers don't hear two different synthetic voices mixed together. The switch
+is in-memory only — a process restart reverts to the env-var defaults.
 
 ## Tests
 ```
