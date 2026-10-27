@@ -35,7 +35,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { describe as describeFsm, openerKind, OPENER_KIND, BRIDGE_KIND } from './dialog-fsm.mjs';
 import { userKeyFor } from './lib/limiter.mjs';
-import { placeFromQuery, swapCityFollowups, splitSentences, ttsSafe } from './lib/text.mjs';
+import { placeFromQuery, swapCityFollowups, splitSentences, speechChunks, ttsSafe } from './lib/text.mjs';
 import { ttsSpeak, proxied, TTS_DIR, streamClips, limiterStats, protectClip, unprotectClip, ttsHealth } from './lib/tts.mjs';
 import { transcribe, sttBlobPath, silentWav } from './lib/stt.mjs';
 import { channelStats, closeChannels, warmChannels } from './lib/channel.mjs';
@@ -186,7 +186,7 @@ async function handle(req, res) {
     const r = await answerFor(query, true, userKey);         // user-facing: priority over any speculation
     // Text first: the answer is returned the moment the data is there. Speech is requested per
     // sentence by the client (POST /speak) so the first sentence starts playing immediately.
-    const sentences = r.ok && r.answer ? splitSentences(ttsSafe(r.answer)).slice(0, 6) : [];
+    const sentences = r.ok && r.answer ? speechChunks(ttsSafe(r.answer)).slice(0, 7) : [];
     const audioUrl = null;
     trace('answer', { query, ok: r.ok, table: r.meta && r.meta.table, has_real_data: r.meta && r.meta.has_real_data, rows: r.meta && r.meta.live_rows_used, reused: r.reused, err: r.err });
     const place = placeFromQuery(query) || (r.meta && (r.meta.place_resolved || r.meta.place_name_requested)) || '';

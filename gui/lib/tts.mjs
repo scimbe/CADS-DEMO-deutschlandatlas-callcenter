@@ -232,6 +232,14 @@ function streamChannelClip(url) {
   return '/tts-stream/' + id;
 }
 
+// Background clips (pools, fillers, facts) must never hold the single channel slot while a caller
+// waits: a running call cannot be pre-empted, so they start only after the answer path was quiet.
+let priorityInFlight = 0, lastPriorityAt = 0;
+async function backgroundGate(maxWaitMs = 90000) {
+  const t0 = Date.now();
+  while ((priorityInFlight > 0 || Date.now() - lastPriorityAt < (Number(process.env.CC_BG_QUIET_MS) || 6000)) && Date.now() - t0 < maxWaitMs) await new Promise((r) => setTimeout(r, 250));
+}
+
 export const proxied = (u) => (u ? (u.startsWith('/') ? u : '/audio?u=' + encodeURIComponent(u)) : null);
 
 /**
@@ -249,9 +257,14 @@ export function ttsSpeak(text, { priority = false, userKey = 'anon', stream = fa
   const fallbackPiperFor = (pr) => (piperReady ? ttsLocalPiper(text, pr, userKey).catch(() => null) : Promise.resolve(null));
   const fallbackPiper = () => fallbackPiperFor(priority);
   if (channelReady && channelUsable()) {
-    return chanLimit(() => ttsChannel(text, voice), priority, userKey).catch(() => null)
+    const tIn = Date.now(); let tCall = tIn, tGot = tIn;
+    if (priority) { priorityInFlight++; lastPriorityAt = tIn; }
+    return (priority ? Promise.resolve() : backgroundGate())
+      .then(() => chanLimit(() => { tCall = Date.now(); return ttsChannel(text, voice); }, priority, userKey)).catch(() => null)
       .then(async (url) => {
+        tGot = Date.now();
         const local = !url ? null : (direct ? ((await probeChannelClip(url)) ? url : null) : await localizeChannelClip(url));
+        if (priority) { priorityInFlight--; lastPriorityAt = Date.now(); console.error(`[trace] tts-stage queue=${tCall - tIn}ms call=${tGot - tCall}ms probe=${Date.now() - tGot}ms chars=${text.length} ok=${!!local}`); }
         if (local) { channelOk(); return local; }
         if (url && priority) channelFailed();                          // clip host unreachable -> breaker (a slow/failed CALL alone does not open it)
         return priority ? fallbackPiperFor(true) : null;   // background clips never take the scarce CPU

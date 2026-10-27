@@ -61,3 +61,21 @@ export function swapCityFollowups(query, place, n) {
   }
   return out;
 }
+
+/** Sentences for speech with a SHORT first chunk: a long first sentence is split at the first comma /
+ *  semicolon / " und " after ~25 characters, so the first audio is ready sooner (synthesis time grows
+ *  with length). Later sentences stay whole. */
+export function speechChunks(text, maxFirst = 70) {
+  const sents = splitSentences(text);
+  if (!sents.length) return sents;
+  const first = sents[0];
+  if (first.length > maxFirst) {
+    const m = first.slice(24).search(/[,;:]\s|\sund\s/);
+    if (m >= 0) {
+      const cut = 24 + m + 1;
+      const a = first.slice(0, cut).trim().replace(/[,;:]$/, ''), b = first.slice(cut).trim().replace(/^und\s+/, '');
+      if (a.length >= 20 && b.length >= 12) return [a + '.', b, ...sents.slice(1)];
+    }
+  }
+  return sents;
+}
