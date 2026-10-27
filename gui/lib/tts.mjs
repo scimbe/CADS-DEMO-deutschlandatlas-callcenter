@@ -140,13 +140,13 @@ function ttsLocalPiper(text, priority, userKey) {
 // clip host (site-<tenant>.bunsenbrenner.org) is unreachable — observed live: every answer was
 // silent (/tts-stream -> 502) because the dead URL was returned and Piper never took over.
 // A clip is only accepted once its bytes were fetched; a failure opens the breaker for
-// CC_CHANNEL_COOLDOWN_MS (default 60 s) during which the channel is skipped entirely. After the
+// CC_CHANNEL_COOLDOWN_MS (default 20 s) during which the channel is skipped entirely. After the
 // cooldown the next call probes again, so channel clips return automatically once the host is back.
 export const channelBreaker = { downUntil: 0, failures: 0 };
 export const channelUsable = () => Date.now() >= channelBreaker.downUntil;
 export function channelFailed() {
   channelBreaker.failures++;
-  channelBreaker.downUntil = Date.now() + (Number(process.env.CC_CHANNEL_COOLDOWN_MS) || 60000);
+  channelBreaker.downUntil = Date.now() + (Number(process.env.CC_CHANNEL_COOLDOWN_MS) || 20000);
 }
 export function channelOk() { channelBreaker.failures = 0; channelBreaker.downUntil = 0; }
 
@@ -193,7 +193,7 @@ async function ttsCloudflareClip(text) {
 
 export async function localizeChannelClip(url, fetchImpl = fetch) {
   try {
-    const resp = await fetchImpl(url, { signal: AbortSignal.timeout(Number(process.env.CC_CLIP_FETCH_MS) || 5000) });
+    const resp = await fetchImpl(url, { signal: AbortSignal.timeout(Number(process.env.CC_CLIP_FETCH_MS) || 10000) });
     if (!resp || !resp.ok) return null;
     const buf = Buffer.from(await resp.arrayBuffer());
     if (!buf.length) return null;
