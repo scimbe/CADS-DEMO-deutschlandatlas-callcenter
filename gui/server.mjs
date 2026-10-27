@@ -36,7 +36,7 @@ import { dirname, join } from 'node:path';
 import { describe as describeFsm, openerKind, OPENER_KIND, BRIDGE_KIND } from './dialog-fsm.mjs';
 import { userKeyFor } from './lib/limiter.mjs';
 import { placeFromQuery, swapCityFollowups, splitSentences, speechChunks, ttsSafe } from './lib/text.mjs';
-import { ttsSpeak, proxied, TTS_DIR, streamClips, limiterStats, protectClip, unprotectClip, ttsHealth } from './lib/tts.mjs';
+import { ttsSpeak, proxied, TTS_DIR, streamClips, limiterStats, protectClip, unprotectClip, ttsHealth, startChannelKeepalive } from './lib/tts.mjs';
 import { transcribe, sttBlobPath, silentWav } from './lib/stt.mjs';
 import { channelStats, closeChannels, warmChannels } from './lib/channel.mjs';
 import { catalogSummary, understand, followupSuggestions, STUB } from './lib/llm.mjs';
@@ -351,6 +351,7 @@ server.listen(PORT, HOST, () => {
   const channelReady = process.env.CT_AGENT_BIN && process.env.CT_RELAY_ENV && process.env.CT_AUDIO_CHANNEL_ID;
   if (channelReady && (process.env.CC_CHANNEL_MODE || 'persistent') !== 'oneshot' && process.env.CC_TTS_STUB !== '1') { warmChannels(); probeChannels(); }
   bridging.prewarm();
+  startChannelKeepalive();
 });
 
 // scimbe: a pseudo request at start. Holding the processes covers the join+pair; this exercises the

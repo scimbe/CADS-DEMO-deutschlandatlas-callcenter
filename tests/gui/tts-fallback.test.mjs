@@ -68,3 +68,12 @@ test('probeChannelClip: reachable clip host -> true; reset / 404 / empty -> fals
   assert.equal(await probeChannelClip('https://x/a.wav', async () => { throw new TypeError('fetch failed'); }), false);
   assert.equal(await probeChannelClip('https://x/a.wav', async () => ({ status: 200, arrayBuffer: async () => new ArrayBuffer(0) })), false);
 });
+
+test('a clip that fails to load is spoken by the browser voice instead of being skipped', async () => {
+  const spoken = [], a = fakeAudio();
+  a.load = () => { setTimeout(() => a.onerror && a.onerror(new Error('404')), 1); };
+  const p = new Player(a, { speak: async (t) => { spoken.push(t); } });
+  const s = p.enqueue('answer', { fallbackText: 'Satz.' }); p.fill(s, 'https://dead/a.wav');
+  await settle(p); await tick(20);
+  assert.deepEqual(spoken, ['Satz.']);
+});

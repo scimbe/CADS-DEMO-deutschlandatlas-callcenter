@@ -234,11 +234,23 @@ function streamChannelClip(url) {
 
 // Background clips (pools, fillers, facts) must never hold the single channel slot while a caller
 // waits: a running call cannot be pre-empted, so they start only after the answer path was quiet.
-let priorityInFlight = 0, lastPriorityAt = 0;
+let priorityInFlight = 0, lastPriorityAt = 0, lastProbeOkAt = 0;
 async function backgroundGate(maxWaitMs = 90000) {
   const t0 = Date.now();
   while ((priorityInFlight > 0 || Date.now() - lastPriorityAt < (Number(process.env.CC_BG_QUIET_MS) || 6000)) && Date.now() - t0 < maxWaitMs) await new Promise((r) => setTimeout(r, 250));
 }
+
+// Keep the whole TTS path (ct-agent worker, relay, M4 piper-serve) warm: a cold first call took 5-11 s.
+let keepaliveTimer = null;
+export function startChannelKeepalive(intervalMs = Number(process.env.CC_KEEPALIVE_MS) || 40000) {
+  if (keepaliveTimer || process.env.CC_TTS !== '1' || !process.env.CT_AGENT_BIN) return;
+  keepaliveTimer = setInterval(() => {
+    if (priorityInFlight > 0 || Date.now() - lastPriorityAt < 15000 || !channelUsable()) return;
+    chanLimit(() => ttsChannel('Ja.', 'primary'), false, 'system').then((u) => { if (u) lastKeepaliveAt = Date.now(); }).catch(() => {});
+  }, intervalMs);
+  if (keepaliveTimer.unref) keepaliveTimer.unref();
+}
+let lastKeepaliveAt = 0;
 
 export const proxied = (u) => (u ? (u.startsWith('/') ? u : '/audio?u=' + encodeURIComponent(u)) : null);
 
@@ -263,7 +275,16 @@ export function ttsSpeak(text, { priority = false, userKey = 'anon', stream = fa
       .then(() => chanLimit(() => { tCall = Date.now(); return ttsChannel(text, voice); }, priority, userKey)).catch(() => null)
       .then(async (url) => {
         tGot = Date.now();
-        const local = !url ? null : (direct ? ((await probeChannelClip(url)) ? url : null) : await localizeChannelClip(url));
+        let local;
+        if (!url) local = null;
+        else if (direct && Date.now() - lastProbeOkAt < 60000) {
+          // Optimistic: the clip host answered a probe < 60 s ago -> hand the URL out NOW (the probe costs
+          // 0.8-3 s on the loaded tunnel) and verify in the background; a failure opens the breaker and
+          // the player falls back to the browser voice (audio onerror).
+          local = url;
+          probeChannelClip(url).then((ok) => { if (ok) lastProbeOkAt = Date.now(); else channelFailed(); });
+        } else if (direct) { local = (await probeChannelClip(url)) ? url : null; if (local) lastProbeOkAt = Date.now(); }
+        else local = await localizeChannelClip(url);
         if (priority) { priorityInFlight--; lastPriorityAt = Date.now(); console.error(`[trace] tts-stage queue=${tCall - tIn}ms call=${tGot - tCall}ms probe=${Date.now() - tGot}ms chars=${text.length} ok=${!!local}`); }
         if (local) { channelOk(); return local; }
         if (url && priority) channelFailed();                          // clip host unreachable -> breaker (a slow/failed CALL alone does not open it)
