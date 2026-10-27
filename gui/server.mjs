@@ -194,7 +194,8 @@ async function handle(req, res) {
     // "same question, other city" follow-ups. Background, low priority, never awaited.
     if (place) produceFactsFor([place], userKey);
     const status = r.ok ? 200 : (r.err === 'QUEUE_FULL' ? 503 : 502);
-    return jsonRes(res, status, { query, ...r, audioUrl, sentences });
+    // err: a short code only — the stderr tail (stack traces, newlines) stays in /debug/trace
+    return jsonRes(res, status, { query, ...r, err: r.ok ? null : (r.err === 'QUEUE_FULL' ? 'QUEUE_FULL' : 'PIPELINE_FAILED'), audioUrl, sentences });
   }
 
   if (req.method === 'POST' && url === '/speak') {

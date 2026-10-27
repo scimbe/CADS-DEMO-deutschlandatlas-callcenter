@@ -79,3 +79,9 @@ export function speechChunks(text, maxFirst = 70) {
   }
   return sents;
 }
+
+/** Spoken/API text hygiene: no control characters (they break strict JSON consumers that re-echo bodies
+ *  through a shell), line breaks become spaces. */
+export function cleanSpoken(text) {
+  return String(text == null ? '' : text).replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, ' ').replace(/\s{2,}/g, ' ').trim();
+}
