@@ -51,6 +51,10 @@
   button:disabled{opacity:.45;cursor:not-allowed}
   button.primary{background:var(--terra);border-color:var(--terra);color:var(--on-accent);font-weight:600}
   button.mic{width:46px;padding:0;font-size:1.1rem}
+  button.mic.call{width:100%;order:-1;padding:1em;font-size:1.15rem;font-weight:600;background:var(--teal);border-color:var(--teal);color:var(--on-accent)}
+  button.mic.call.on{background:var(--red);border-color:var(--red);color:#fff}
+  .ask input[type=text]{opacity:.85}
+  #qEcho{font-size:1.05rem}
   button.mic.on{background:var(--red);border-color:var(--red);color:#fff;animation:pulse 1.1s infinite}
   @keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(234,106,106,.5)}70%{box-shadow:0 0 0 9px rgba(234,106,106,0)}}
   .examples{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
@@ -88,26 +92,11 @@
   .fftoggle input{accent-color:var(--teal)}
   @media (prefers-reduced-motion:reduce){*{animation-duration:.001ms!important}}
   /* mobile-minimal: show only the animation + prompt + suggestions; the rest expands on demand */
-  .m-toggle{display:none}
-  @media (max-width:640px){
-    .m-toggle{display:inline-flex;align-items:center;gap:.4em;margin-top:14px;font-size:.85rem;color:var(--dim);
-      background:var(--surface);border:1px solid var(--line);border-radius:999px;padding:.5em 1em;cursor:pointer}
-    .m-toggle:hover{color:var(--ink)}
-    body:not(.m-open) .lede,
-    body:not(.m-open) .answer,
-    body:not(.m-open) #playctl,
-    body:not(.m-open) .fftoggle,
-    body:not(.m-open) footer{display:none}
-  }
 </style>
 </head>
 <body>
 <div class="wrap">
   <button id="langToggle" type="button" title="Language / Sprache" style="float:right;margin-top:2px;background:rgba(127,127,127,.14);border:1px solid rgba(127,127,127,.35);color:inherit;border-radius:8px;padding:4px 11px;font:inherit;font-size:13px;font-weight:600;letter-spacing:.03em;cursor:pointer">EN</button>
-  <div class="eyebrow"><span class="dot"></span><span data-i18n="eyebrow">Deutschlandatlas · Sprach-Callcenter</span></div>
-  <h1 data-i18n="h1">Stellen Sie eine Frage — die Antwort kommt aus echten, live abgefragten Daten.</h1>
-  <p class="lede" data-i18n="lede">Fragen Sie zu einem Ort in Deutschland (Kriminalität, Bildung, Beschäftigung, Wohnen …). Der Agent
-    sucht die passende Deutschlandatlas-Tabelle, fragt sie live ab und antwortet geerdet — oder lehnt ehrlich ab.</p>
   <div class="gdprBanner" id="gdprBanner" hidden></div>
 
   <div class="stage">
@@ -119,15 +108,13 @@
     </div>
     <div class="ask">
       <input type="text" id="q" placeholder="Ihre Frage, z. B. Wie hoch ist die Straftatenquote in Kiel?" data-i18n-ph="placeholder" autocomplete="off">
-      <button class="mic" id="mic" title="Sprechen (Deutsch)" data-i18n-title="micTitle">🎙️</button>
+      <button class="mic call" id="mic" title="Sprechen (Deutsch)" data-i18n-title="micTitle"><span class="cl" id="callLbl">🎙️ Anrufen</span></button>
       <button class="primary" id="go" data-i18n="go">Fragen</button>
       <div class="playctl" id="playctl"><button id="pauseBtn">⏸ Pause</button><button id="stopBtn" data-i18n="stop">⏹ Stopp</button></div>
-      <label class="fftoggle" title="„Wussten Sie schon" nur anzeigen, nicht vor der Antwort vorlesen (dann entsteht ggf. eine kurze Pause)" data-i18n-title="ffTitle"><input type="checkbox" id="speakff" checked> <span data-i18n="ffLabel">„Wussten Sie schon" vorlesen</span></label>
     </div>
   </div>
 
   <div class="examples" id="examples"></div>
-  <button class="m-toggle" id="mToggle" aria-expanded="false" data-i18n="more">mehr anzeigen ▾</button>
 
   <div class="answer">
     <div class="q" id="qEcho"></div>
@@ -138,11 +125,6 @@
   </div>
   <audio id="player"></audio>
 
-  <footer>
-    <div class="fl"><a class="support" href="https://scimbe.github.io/CADS-agent-marketplace-docs/how-to/install-and-customize-a-demo/" target="_blank" rel="noopener" data-i18n="footerInstall">Lokal installieren &amp; anpassen ↗</a></div>
-    <div class="fl"><a class="support" href="https://steady.page/plans/77a32d9c-c399-4ca1-9515-7a628c7a9413" target="_blank" rel="noopener" data-i18n="footerSupport">Als Mitglied unterstützen →</a><a class="support" href="https://buymeacoffee.com/bunsenbrenner" target="_blank" rel="noopener">Buy me a coffee →</a><a href="https://github.com/scimbe/CADS-Tunnel" target="_blank" rel="noopener">GitHub</a><a href="https://bunsenbrenner.org/legal-notice" target="_blank" rel="noopener">Legal Notice</a><a href="https://bunsenbrenner.org/privacy-policy" target="_blank" rel="noopener">Privacy Policy</a><a href="https://bunsenbrenner.org/terms-of-use" target="_blank" rel="noopener">Terms of Use</a></div>
-    <span><span data-i18n="footerNote">Antworten aus der Live-Deutschlandatlas-API · nichts erfunden · </span><a href="https://bunsenbrenner.org" target="_blank" rel="noopener">bunsenbrenner.org</a></span>
-  </footer>
 </div>
 
 <script type="module">
@@ -228,6 +210,7 @@ import { Player, Dialog } from '/dialog-client.mjs';
   requestAnimationFrame(frame);
 
   // ---------- DOM refs ----------
+  const callLbl=document.getElementById('callLbl');
   const q=document.getElementById('q'),go=document.getElementById('go'),mic=document.getElementById('mic');
   const aEl=document.getElementById('a'),qEcho=document.getElementById('qEcho'),src=document.getElementById('src'),srcTxt=document.getElementById('srcTxt');
   const player=document.getElementById('player'),replay=document.getElementById('replay'),timerEl=document.getElementById('timer');
@@ -274,8 +257,14 @@ import { Player, Dialog } from '/dialog-client.mjs';
 
   // ---------- the ONE ordered player (dialog-fsm.mjs I1/I2) ----------
   let lastAnswerUrl=null;
+  // Browser voice: used per sentence whenever the server has no audio in time (see Dialog._speakAnswer).
+  function browserSpeak(text){ return new Promise((res)=>{ try{ const ss=window.speechSynthesis; if(!ss||!text){ res(); return; }
+      const u=new SpeechSynthesisUtterance(text); u.lang='de-DE'; u.rate=1.05;
+      const v=(ss.getVoices()||[]).find(x=>/^de/i.test(x.lang)); if(v) u.voice=v;
+      u.onend=u.onerror=()=>res(); ss.speak(u); }catch(e){ res(); } }); }
   const speech=new Player(player,{
-    onSpeaking:(on,it)=>{ speaking=on; if(on){ showCtl(); setState('speak'); replay.style.display='none'; if(it&&it.part==='answer') lastAnswerUrl=it.url; } },
+    speak:browserSpeak, cancelSpeech:()=>{ try{ window.speechSynthesis&&window.speechSynthesis.cancel(); }catch(e){} },
+    onSpeaking:(on,it)=>{ speaking=on; if(on){ showCtl(); setState('speak'); replay.style.display='none'; if(it&&it.part==='answer'){ lastAnswerUrl=it.url||'browser'; } } },
     onIdle:()=>{ speaking=false; if(state==='speak') setState('done'); if(lastAnswerUrl){ replay.style.display='inline-block'; } },
   });
   // Unlock audio within the user gesture (browsers block a later play() once the gesture's activation expired).
@@ -286,7 +275,7 @@ import { Player, Dialog } from '/dialog-client.mjs';
     }catch(e){ player.muted=false; } }
   pauseBtn.onclick=()=>{ const p=speech.togglePause(); pauseBtn.textContent=tr(p?'resume':'pause'); };
   stopBtn.onclick=()=>{ speech.stopAll(); hideCtl(); setState('done'); };
-  replay.onclick=()=>{ if(lastAnswerUrl){ const s=speech.enqueue('answer'); speech.fill(s,lastAnswerUrl); } };
+  replay.onclick=()=>{ const t=aEl.textContent; if(t){ const s=speech.enqueue('answer',{fallbackText:t}); speech.fill(s,null); } };
 
   // ---------- API + UI adapters for the dialogue engine ----------
   const post=(url,body)=>fetch(url,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body||{})}).then(r=>r.json());
@@ -297,6 +286,7 @@ import { Player, Dialog } from '/dialog-client.mjs';
     bridge:(kind,query,place)=>post('/bridge',{kind,query,place}),
     answer:(query)=>post('/answer',{query}),
     followup:(query,answer)=>post('/followup',{query,answer}),
+    speak:(text,budgetMs)=>post('/speak',{text,budgetMs}),
   };
   const ui={
     t:tr, setState,
@@ -341,7 +331,7 @@ import { Player, Dialog } from '/dialog-client.mjs';
     try{
       const blob=new Blob(recChunks,{type:(mediaRec&&mediaRec.mimeType)||'audio/webm'});
       const d=await (await fetch('/stt',{method:'POST',headers:{'content-type':blob.type},body:blob})).json();
-      if(myseq===interimSeq && recording){ const t=(d.text||'').replace(/[\[(][^\])]*[\])]/g,'').trim(); if(t) q.value=t; }
+      if(myseq===interimSeq && recording){ const t=(d.text||'').replace(/[\[(][^\])]*[\])]/g,'').trim(); if(t){ q.value=t; ui.echoQuery('your',t); } }
     }catch(e){}
     finally{ sttInFlight=false; }
   }
@@ -351,7 +341,7 @@ import { Player, Dialog } from '/dialog-client.mjs';
       recChunks=[]; mediaRec=new MediaRecorder(recStream);
       mediaRec.ondataavailable=e=>{if(e.data&&e.data.size)recChunks.push(e.data);};
       mediaRec.onstop=async ()=>{
-        recording=false; mic.classList.remove('on');
+        recording=false; mic.classList.remove('on'); callLbl.textContent='🎙️ Anrufen';
         try{ if(vadTimer){clearInterval(vadTimer);vadTimer=null;} if(vadCtx){vadCtx.close();vadCtx=null;} }catch(e){}
         try{recStream.getTracks().forEach(t=>t.stop());}catch(e){}
         setState('think'); aEl.className='a working'; aEl.textContent=tr('processingRec');
@@ -363,7 +353,7 @@ import { Player, Dialog } from '/dialog-client.mjs';
           else { aEl.className='a'; aEl.textContent=tr('micUnclear'); setState('idle'); }
         }catch(e){ aEl.className='a'; aEl.textContent=tr('sttError'); setState('idle'); }
       };
-      mediaRec.start(1000); recording=true; mic.classList.add('on'); setState('listen');
+      mediaRec.start(1000); recording=true; mic.classList.add('on'); callLbl.textContent='⏹ Auflegen'; setState('listen');
       aEl.className='a working'; aEl.textContent=tr('listening');
       try{
         vadCtx=new (window.AudioContext||window.webkitAudioContext)();
@@ -393,13 +383,6 @@ import { Player, Dialog } from '/dialog-client.mjs';
   applyStatic();
   { const lt=document.getElementById('langToggle'); if(lt) lt.onclick=()=>setLang(lang==='de'?'en':'de'); }
 })();
-</script>
-<script>
-  /* mobile-minimal toggle — pure UI, independent of the speech/queue logic */
-  (function(){var t=document.getElementById('mToggle');if(!t)return;
-    t.addEventListener('click',function(){var o=document.body.classList.toggle('m-open');
-      t.setAttribute('aria-expanded',o?'true':'false');
-      t.textContent = window.ccT ? window.ccT(o?'less':'more') : (o?'weniger anzeigen ▴':'mehr anzeigen ▾');});})();
 </script>
 </body>
 </html>

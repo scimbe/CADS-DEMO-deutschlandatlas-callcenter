@@ -107,8 +107,11 @@ test('tts.mjs speaks over the held channel: one process, many clips, URL handed 
   delete process.env.CC_TTS_STUB; delete process.env.CC_PIPER_BIN;
   const { ttsSpeak } = await import('../../gui/lib/tts.mjs');
   const { channelStats, closeChannels } = await import('../../gui/lib/channel.mjs');
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({ ok: true, arrayBuffer: async () => new Uint8Array(200).buffer });   // the clip host answers
   const urls = await Promise.all(['Guten Tag.', 'Ich habe verstanden.', 'Wussten Sie schon?'].map((t) => ttsSpeak(t, { priority: false, userKey: 'u1' })));
-  assert.ok(urls.every((u) => u && /clip-\d+\.wav$/.test(u)), JSON.stringify(urls));
+  globalThis.fetch = realFetch;
+  assert.ok(urls.every((u) => u && /^\/tts\/ch-.*\.wav$/.test(u)), JSON.stringify(urls));   // fetched + localised
   const st = channelStats().find((c) => c.service === 'audio_generation');
   assert.ok(st, 'a held audio_generation client exists');
   assert.equal(st.spawns, 1, 'ONE process for three clips'); assert.equal(st.ok, 3);

@@ -23,8 +23,8 @@ export class Player {
     this.timers = hooks.timers || { set: (f, ms) => setTimeout(f, ms), clear: (t) => clearTimeout(t) };
   }
   /** Reserve the next slot for `part`; fill it later with fill(). */
-  enqueue(part, { optional = false } = {}) {
-    const item = { id: ++this.seq, part, url: null, ready: false, started: false, played: false, optional, soft: isSoft(part) };
+  enqueue(part, { optional = false, fallbackText = null } = {}) {
+    const item = { id: ++this.seq, part, fallbackText, url: null, ready: false, started: false, played: false, optional, soft: isSoft(part) };
     item.startedP = new Promise((res) => { item._start = res; });
     // endedP: resolves when the clip has finished playing, or at once for a skipped/dropped slot
     item.endedP = new Promise((res) => { item._end = res; });
@@ -64,6 +64,15 @@ export class Player {
     const it = this.queue.find((s) => !s.played);
     if (!it) { this.hooks.onIdle && this.hooks.onIdle(); return; }
     if (!it.ready) { if (it.optional) this.hooks.onIdle && this.hooks.onIdle(); return; }   // preserve order: wait for the head slot
+    if (!it.url && it.fallbackText && this.hooks.speak) {
+      // No server audio (TTS slow/down): the browser speaks the text itself, so a turn is never silent.
+      this.busy = true; it.started = true; it.played = true; it._start('playing');
+      this.hooks.onSpeaking && this.hooks.onSpeaking(true, it);
+      let done = false;
+      const finish = () => { if (done) return; done = true; this.busy = false; it._end('played'); this.hooks.onSpeaking && this.hooks.onSpeaking(false, it); this.timers.set(() => this.pump(), 0); };
+      try { Promise.resolve(this.hooks.speak(it.fallbackText)).then(finish, finish); } catch { finish(); }
+      return;
+    }
     if (!it.url) { it.played = true; it.started = true; it._start('skipped'); this.pump(); return; }
     this.busy = true; it.started = true; it.played = true; it._start('playing');
     this.hooks.onSpeaking && this.hooks.onSpeaking(true, it);
@@ -91,6 +100,7 @@ export class Player {
     for (const it of this.queue) { if (!it.played) { it.played = true; it._start('dropped'); } it._end('dropped'); }
     this.queue = []; this.busy = false; this.paused = false;
     try { this.audio.pause(); this.audio.currentTime = 0; this.audio.onended = null; } catch {}
+    try { this.hooks.cancelSpeech && this.hooks.cancelSpeech(); } catch {}
     this.hooks.onSpeaking && this.hooks.onSpeaking(false, null);
     this.hooks.onIdle && this.hooks.onIdle();
   }
@@ -112,7 +122,8 @@ export class Dialog {
    *        bubbles(items, note, source), examples(), clarify(text), busy(bool), error(msg),
    *        ffToggle()->bool (speak facts?)
    */
-  constructor({ player, api, ui, bridgePauseMs = BRIDGE_PAUSE_MS }) {
+  constructor({ player, api, ui, bridgePauseMs = BRIDGE_PAUSE_MS, firstSentenceBudgetMs = 3500 }) {
+    this.firstSentenceBudgetMs = firstSentenceBudgetMs;
     this.player = player; this.api = api; this.ui = ui; this.bridgePauseMs = bridgePauseMs;
     this.turnCount = 0; this.history = []; this.lastQuery = null; this.lastAnswer = null;
     this.slots = { ort: null, indikator: null }; this.pending = null; this.followupActive = false; this.offered = null;
@@ -154,7 +165,7 @@ export class Dialog {
     // CLARIFY: the question replaces the answer this turn (hard part → pending soft parts are dropped)
     turn.waiting = false; this.player.dropPendingSoft();
     this.pending = { clarify: u.clarify || '', best_guess: u.best_guess || '', options: u.options || [], original: query };
-    const c = this.player.enqueue(PART.CLARIFY); this.player.fill(c, u.clarifyAudioUrl || null);
+    const c = this.player.enqueue(PART.CLARIFY, { fallbackText: u.clarify || null }); this.player.fill(c, u.clarifyAudioUrl || null);
     this.ui.setState('idle'); this.ui.clarify(u.clarify);
     const items = [];
     if (u.best_guess) items.push({ label: u.best_guess, best: true, onClick: () => this.deliverChoice(u.best_guess, false) });
@@ -230,7 +241,7 @@ export class Dialog {
     const matched = okA && (d.meta ? (d.meta.has_real_data !== false && !!d.meta.table) : true);
     const ans = okA ? (d.answer || this.ui.t('noAnswer')) : this.ui.t('busy');
     this.ui.answer(ans, d.meta, okA, matched, !!d.reused);
-    const sA = this.player.enqueue(PART.ANSWER); this.player.fill(sA, okA ? d.audioUrl : null);
+    this._speakAnswer(okA ? (d.sentences && d.sentences.length ? d.sentences : [ans]) : [ans]);
     this.ui.busy(false);
     if (!okA) { this.followupActive = false; this.ui.examples(); this.ui.setState('done'); turn.active = false; this._prepareNext(); return; }
     this.lastQuery = query; this.lastAnswer = ans;
@@ -240,9 +251,23 @@ export class Dialog {
     // dropped the slot. (A fixed cutoff here left the invite silent on every slow /followup: the
     // bubbles appeared, the "Ja" was on screen, but the spoken question never came.)
     const sI = this.player.enqueue(PART.INVITE, { optional: true });
-    withTimeout(this._followup(query, ans), 60000).then((url) => this.player.fill(sI, url));
+    withTimeout(this._followup(query, ans), 60000).then((url) => { if (!url && this.offered && this.offered.invite) sI.fallbackText = this.offered.invite; this.player.fill(sI, url); });
     turn.active = false;
     this._prepareNext();
+  }
+  /** Speak the answer sentence by sentence: the first sentence is requested alone with a short budget;
+   *  if its audio is not ready in time (TTS slow or down) the browser speaks the whole answer, so the
+   *  caller hears it right away instead of waiting for the full clip. Otherwise the rest follows. */
+  _speakAnswer(sentences) {
+    const slots = sentences.map((t) => this.player.enqueue(PART.ANSWER, { fallbackText: t }));
+    const speak = this.api.speak ? (t, budgetMs) => this.api.speak(t, budgetMs).then((r) => (r && r.audioUrl) || null).catch(() => null) : () => Promise.resolve(null);
+    speak(sentences[0], this.firstSentenceBudgetMs).then((u0) => {
+      this.player.fill(slots[0], u0);
+      slots.slice(1).forEach((sl, i) => {
+        if (!u0) { this.player.fill(sl, null); return; }          // browser voice for the whole answer: no mixing
+        speak(sentences[i + 1], 12000).then((u) => this.player.fill(sl, u));
+      });
+    });
   }
   async _followup(query, answer) {
     try {

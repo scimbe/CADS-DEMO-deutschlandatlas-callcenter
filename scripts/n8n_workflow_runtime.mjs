@@ -128,6 +128,7 @@ async function llmChat({ system, user, temperature, max_tokens, json_object }) {
   const url = `${base.replace(/\/+$/, "")}/chat/completions`;
   const body = {
     model,
+    ...(/^local-/.test(model) ? { think: false } : {}),   // thinking off: empty content + reasoning_content otherwise
     temperature,
     max_tokens,
     messages: [

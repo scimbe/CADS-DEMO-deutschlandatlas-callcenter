@@ -89,24 +89,66 @@ async function ttsStub(text) {
   return url;
 }
 
+// Persistent Piper: ONE long-lived process with the voice loaded (--json-input). The old
+// spawn-per-clip paid the ~3 s model load for every clip on a 2-vCPU host (measured: 13 s cold for a
+// 5 s sentence). Each request is one JSON line; Piper prints the written file path when done.
+// Speed: CC_PIPER_LENGTH_SCALE (default 0.9 = ~10 % faster speech).
+class PiperServer {
+  constructor() { this.p = null; this.cur = null; this.buf = ''; }
+  _start() {
+    const args = ['--model', process.env.CC_PIPER_MODEL, '--json-input', '--length_scale', String(process.env.CC_PIPER_LENGTH_SCALE || 0.9), '--sentence_silence', '0.1'];
+    const p = spawn(process.env.CC_PIPER_BIN, args, { env: process.env, stdio: ['pipe', 'pipe', 'ignore'] });
+    this.p = p; this.buf = '';
+    p.stdout.on('data', (d) => {
+      this.buf += d; let i;
+      while ((i = this.buf.indexOf('\n')) >= 0) {
+        const line = this.buf.slice(0, i).trim(); this.buf = this.buf.slice(i + 1);
+        if (this.cur && line === this.cur.wav) { const c = this.cur; this.cur = null; clearTimeout(c.timer); c.resolve(true); }
+      }
+    });
+    const gone = () => { if (this.p === p) this.p = null; if (this.cur) { const c = this.cur; this.cur = null; clearTimeout(c.timer); c.resolve(false); } };
+    p.on('exit', gone); p.on('error', gone); p.stdin.on('error', () => {});
+  }
+  /** One synthesis (callers are serialised by piperLimit). Resolves true when `wav` was written. */
+  synth(text, wav, timeoutMs = Number(process.env.CC_PIPER_TIMEOUT_MS) || 45000) {
+    return new Promise((resolve) => {
+      if (!this.p) { try { this._start(); } catch { return resolve(false); } }
+      const c = { wav, resolve, timer: setTimeout(() => { if (this.cur === c) { this.cur = null; try { this.p.kill('SIGKILL'); } catch {} this.p = null; resolve(false); } }, timeoutMs) };
+      this.cur = c;
+      try { this.p.stdin.write(JSON.stringify({ text, output_file: wav }) + '\n'); } catch { this.cur = null; clearTimeout(c.timer); resolve(false); }
+    });
+  }
+  close() { try { this.p && this.p.kill('SIGKILL'); } catch {} this.p = null; }
+}
+export const piperServer = new PiperServer();
+
 function ttsLocalPiper(text, priority, userKey) {
   const tQueued = Date.now();
-  return piperLimit(() => new Promise((resolve) => {
+  return piperLimit(async () => {
     const tStart = Date.now();
     const { wav, url } = newClipPath();
-    let done = false;
-    const fin = (v) => { if (done) return; done = true;
-      console.error(`[trace] piper-tts prio=${priority ? 'hi' : 'lo'} queued=${tStart - tQueued}ms synth=${Date.now() - tStart}ms chars=${(text || '').length} ok=${v != null}`);
-      resolve(v); };
-    try {
-      const p = spawn(process.env.CC_PIPER_BIN, ['--model', process.env.CC_PIPER_MODEL, '--output_file', wav], { env: process.env });
-      p.stdin.on('error', () => {});
-      p.stdin.end(text);
-      p.on('close', async (code) => { if (code === 0 && existsSync(wav)) await applyFadeIn(wav); pruneTtsDir(); fin(code === 0 && existsSync(wav) ? url : null); });
-      p.on('error', () => fin(null));
-    } catch { fin(null); }
-  }), priority, userKey);
+    const ok = await piperServer.synth(text, wav);
+    if (ok && existsSync(wav)) await applyFadeIn(wav);
+    pruneTtsDir();
+    const good = ok && existsSync(wav);
+    console.error(`[trace] piper-tts prio=${priority ? 'hi' : 'lo'} queued=${tStart - tQueued}ms synth=${Date.now() - tStart}ms chars=${(text || '').length} ok=${good}`);
+    return good ? url : null;
+  }, priority, userKey);
 }
+
+// Channel circuit breaker. The channel can "succeed" (a clip URL comes back in ~0.2 s) while the
+// clip host (site-<tenant>.bunsenbrenner.org) is unreachable — observed live: every answer was
+// silent (/tts-stream -> 502) because the dead URL was returned and Piper never took over.
+// A clip is only accepted once its bytes were fetched; a failure opens the breaker for
+// CC_CHANNEL_COOLDOWN_MS (default 20 s) during which the channel is skipped entirely. After the
+// cooldown the next call probes again, so channel clips return automatically once the host is back.
+export const channelBreaker = { downUntil: 0, failures: 0 };
+export const channelUsable = () => Date.now() >= channelBreaker.downUntil;
+export function channelFailed() {
+  channelBreaker.failures++;
+  channelBreaker.downUntil = Date.now() + (Number(process.env.CC_CHANNEL_COOLDOWN_MS) || 20000);
+}
+export function channelOk() { channelBreaker.failures = 0; channelBreaker.downUntil = 0; }
 
 // One audio_generation call over the channel. Resolves to an https clip URL or null. A channel
 // call must never hang a turn: a timeout resolves null so the caller falls back to Piper.
@@ -117,7 +159,7 @@ function ttsLocalPiper(text, priority, userKey) {
 async function ttsChannel(text, voice = 'primary') {
   if ((process.env.CC_CHANNEL_MODE || 'persistent') !== 'oneshot') {
     const out = await channelFor('audio_generation', Number(process.env.CC_CHANNEL_CONCURRENCY) || 1)
-      .call({ text, voice }, Number(process.env.CC_CHANNEL_TIMEOUT_MS) || 8000);
+      .call({ text, voice }, Math.min(Number(process.env.CC_CHANNEL_TIMEOUT_MS) || 12000, 12000));
     const url = (out || '').trim().split('\n').pop() || '';
     return /^https:\/\//.test(url.trim()) ? url.trim() : null;
   }
@@ -149,18 +191,33 @@ async function ttsCloudflareClip(text) {
   return url;
 }
 
-async function localizeChannelClip(url) {
+/** Reachability check for a user-facing clip: a 1 KB ranged GET (the tunnel moves full clips at only
+ *  ~40 KB/s under load — measured 3-5 s per 130 KB — so the SERVER must not download them; the
+ *  browser plays the https URL directly). True only for a 200/206 with at least one byte. */
+export async function probeChannelClip(url, fetchImpl = fetch) {
   try {
-    const resp = await fetch(url);
-    if (!resp || !resp.ok) return url;
+    const r = await fetchImpl(url, { headers: { range: 'bytes=0-1023' }, signal: AbortSignal.timeout(Number(process.env.CC_CLIP_PROBE_MS) || 4000) });
+    if (!r || !(r.status === 200 || r.status === 206)) return false;
+    if (r.body && r.body.getReader) {                      // the clip server ignores Range: read the first chunk, drop the rest
+      const rd = r.body.getReader(); const { value } = await rd.read(); try { await rd.cancel(); } catch {}
+      return !!(value && value.length > 0);
+    }
+    return Buffer.from(await r.arrayBuffer()).length > 0;
+  } catch { return false; }
+}
+
+export async function localizeChannelClip(url, fetchImpl = fetch) {
+  try {
+    const resp = await fetchImpl(url, { signal: AbortSignal.timeout(Number(process.env.CC_CLIP_FETCH_MS) || 10000) });
+    if (!resp || !resp.ok) return null;
     const buf = Buffer.from(await resp.arrayBuffer());
-    if (!buf.length) return url;
+    if (!buf.length) return null;
     const { wav, url: local } = newClipPath('ch-');
     await writeFile(wav, buf);
     await applyFadeIn(wav);
     pruneTtsDir();
     return local;
-  } catch { return url; }
+  } catch { return null; }
 }
 
 // STREAMING path (CC_TTS_STREAM=1) for the answer: register the channel URL and return a
@@ -181,7 +238,7 @@ export const proxied = (u) => (u ? (u.startsWith('/') ? u : '/audio?u=' + encode
  * Speak `text`. priority=true for the user-facing answer/clarify (jumps every queue), false for
  * bridging/prepared material. Never rejects: resolves a same-origin path, or null.
  */
-export function ttsSpeak(text, { priority = false, userKey = 'anon', stream = false, voice = 'primary' } = {}) {
+export function ttsSpeak(text, { priority = false, userKey = 'anon', stream = false, voice = 'primary', direct = false } = {}) {
   text = ttsSafe(text);
   if (!text) return Promise.resolve(null);
   if (process.env.CC_TTS_STUB === '1') return ttsStub(text).catch(() => null);
@@ -189,11 +246,20 @@ export function ttsSpeak(text, { priority = false, userKey = 'anon', stream = fa
   if (TTS_PROVIDER === 'cloudflare') return ttsCloudflareClip(text).catch(() => null);
   const channelReady = process.env.CT_AGENT_BIN && process.env.CT_RELAY_ENV && process.env.CT_AUDIO_CHANNEL_ID;
   const piperReady = process.env.CC_PIPER_BIN && process.env.CC_PIPER_MODEL;
-  const fallbackPiper = () => (piperReady ? ttsLocalPiper(text, priority, userKey).catch(() => null) : Promise.resolve(null));
-  if (channelReady) {
+  const fallbackPiperFor = (pr) => (piperReady ? ttsLocalPiper(text, pr, userKey).catch(() => null) : Promise.resolve(null));
+  const fallbackPiper = () => fallbackPiperFor(priority);
+  if (channelReady && channelUsable()) {
     return chanLimit(() => ttsChannel(text, voice), priority, userKey).catch(() => null)
-      .then((url) => (url ? ((process.env.CC_TTS_STREAM === '1' && stream) ? streamChannelClip(url) : localizeChannelClip(url)) : fallbackPiper()));
+      .then(async (url) => {
+        const local = !url ? null : (direct ? ((await probeChannelClip(url)) ? url : null) : await localizeChannelClip(url));
+        if (local) { channelOk(); return local; }
+        if (url && priority) channelFailed();                          // clip host unreachable -> breaker (a slow/failed CALL alone does not open it)
+        return priority ? fallbackPiperFor(true) : null;   // background clips never take the scarce CPU
+      });
   }
+  // Channel down: background material (fillers, pools) is not worth the scarce CPU — only the
+  // user-facing speech (priority) is synthesised locally.
+  if (channelReady && !priority) return Promise.resolve(null);
   return fallbackPiper();
 }
 
@@ -201,3 +267,4 @@ export function ttsSpeak(text, { priority = false, userKey = 'anon', stream = fa
 export const speakUrl = (text, opts) => ttsSpeak(text, opts).then(proxied);
 
 export const limiterStats = () => ({ piper: piperLimit.stats(), channel: chanLimit.stats() });
+export const ttsHealth = () => ({ channelUsable: channelUsable(), failures: channelBreaker.failures, retryInMs: Math.max(0, channelBreaker.downUntil - Date.now()) });

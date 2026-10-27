@@ -35,8 +35,8 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { describe as describeFsm, openerKind, OPENER_KIND, BRIDGE_KIND } from './dialog-fsm.mjs';
 import { userKeyFor } from './lib/limiter.mjs';
-import { placeFromQuery, swapCityFollowups } from './lib/text.mjs';
-import { ttsSpeak, proxied, TTS_DIR, streamClips, limiterStats, protectClip, unprotectClip } from './lib/tts.mjs';
+import { placeFromQuery, swapCityFollowups, splitSentences, ttsSafe } from './lib/text.mjs';
+import { ttsSpeak, proxied, TTS_DIR, streamClips, limiterStats, protectClip, unprotectClip, ttsHealth } from './lib/tts.mjs';
 import { transcribe, sttBlobPath, silentWav } from './lib/stt.mjs';
 import { channelStats, closeChannels, warmChannels } from './lib/channel.mjs';
 import { catalogSummary, understand, followupSuggestions, STUB } from './lib/llm.mjs';
@@ -154,14 +154,12 @@ async function handle(req, res) {
     answerFor(u.best_guess, false, userKey);                // also warm the resolved query (cache hit when unchanged)
     if (u.precise) {
       bridging.verstehen(u.best_guess, userKey).catch(() => {});   // prefetch the echo the client asks for next
-      // Follow-up candidates ("same question, other city") are answerable by construction — start
-      // their DATA speculation now, in parallel with the real answer (low priority), so /followup can
-      // validate them within its budget instead of racing pipelines that only began when the answer
-      // returned (that race left slow turns without any follow-up).
+      // (No speculative pipelines for follow-up cities here any more: each one is 2 LLM calls on the
+      // shared model and made the REAL answer queue behind them — catalog-match 3-11 s. /followup
+      // validates its candidates after the answer was delivered.)
       const place = (u.slots && u.slots.ort) || placeFromQuery(u.best_guess) || '';
-      const swaps = swapCityFollowups(u.best_guess, place, 3);
-      swaps.forEach((s) => { answerFor(s, false, userKey); });
-      if (swaps[0]) prepareInvite(swaps[0], userKey);   // the invite for the likeliest follow-up, spoken now
+      const swaps = swapCityFollowups(u.best_guess, place, 1);
+      if (swaps[0]) prepareInvite(swaps[0], userKey);
       // N1 for THIS place too (low priority): a slow answer then gets a fact about the place asked
       // about, never one about a different place (the fact bridge is same-place or generic only)
       if (place) produceFactsFor([place], userKey);
@@ -186,16 +184,30 @@ async function handle(req, res) {
     const query = str((await readBody(req)).query);
     if (!query.trim()) return jsonRes(res, 400, { error: 'empty query' });
     const r = await answerFor(query, true, userKey);         // user-facing: priority over any speculation
-    let audioUrl = null;
-    if (r.ok && r.answer) { try { audioUrl = proxied(await ttsSpeak(r.answer, { priority: true, userKey, stream: true })); } catch {} }
+    // Text first: the answer is returned the moment the data is there. Speech is requested per
+    // sentence by the client (POST /speak) so the first sentence starts playing immediately.
+    const sentences = r.ok && r.answer ? splitSentences(ttsSafe(r.answer)).slice(0, 6) : [];
+    const audioUrl = null;
     trace('answer', { query, ok: r.ok, table: r.meta && r.meta.table, has_real_data: r.meta && r.meta.has_real_data, rows: r.meta && r.meta.live_rows_used, reused: r.reused, err: r.err });
     const place = placeFromQuery(query) || (r.meta && (r.meta.place_resolved || r.meta.place_name_requested)) || '';
     // I6: prepare the NEXT round now — the fact for this place (N1) and the data for the likely
     // "same question, other city" follow-ups. Background, low priority, never awaited.
     if (place) produceFactsFor([place], userKey);
-    if (hasRealData(r)) swapCityFollowups(query, place, 3).forEach((s) => { answerFor(s, false, userKey); });
     const status = r.ok ? 200 : (r.err === 'QUEUE_FULL' ? 503 : 502);
-    return jsonRes(res, status, { query, ...r, audioUrl });
+    return jsonRes(res, status, { query, ...r, audioUrl, sentences });
+  }
+
+  if (req.method === 'POST' && url === '/speak') {
+    // ONE sentence of the answer. Resolves {audioUrl} or {audioUrl:null} when it is not ready within
+    // the budget — the browser then speaks it itself (speechSynthesis), so the caller never waits.
+    const b = await readBody(req);
+    const text = str(b.text, 400);
+    if (!text.trim()) return jsonRes(res, 400, { error: 'empty text' });
+    const budget = Math.min(Math.max(Number(b.budgetMs) || 4000, 500), 15000);
+    const t0 = Date.now();
+    const au = await Promise.race([ttsSpeak(text, { priority: true, userKey, direct: true }), sleep(budget).then(() => null)]);
+    trace('speak', { chars: text.length, ms: Date.now() - t0, ok: !!au, tts: ttsHealth() });
+    return jsonRes(res, 200, { audioUrl: au });   // https clip URL (played directly by the browser) or a local /tts/ path
   }
 
   if (req.method === 'POST' && url === '/followup') {
@@ -289,7 +301,7 @@ async function handle(req, res) {
     return;
   }
   if (req.method === 'GET' && url === '/health') {
-    return jsonRes(res, 200, { status: 'ok', uptime_s: Math.round(process.uptime()), pid: process.pid, stub: STUB, pools: bridging.poolStats(), facts: bridging.factStats(), providers: providerSummary() });
+    return jsonRes(res, 200, { status: 'ok', uptime_s: Math.round(process.uptime()), pid: process.pid, stub: STUB, pools: bridging.poolStats(), facts: bridging.factStats(), providers: providerSummary(), tts: ttsHealth() });
   }
   if (req.method === 'GET' && url === '/providers') {
     // Same info as /health's "providers" field, as its own tiny endpoint so the GUI can poll just
