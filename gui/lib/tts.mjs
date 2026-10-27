@@ -191,6 +191,18 @@ async function ttsCloudflareClip(text) {
   return url;
 }
 
+/** Reachability check for a user-facing clip: a 1 KB ranged GET (the tunnel moves full clips at only
+ *  ~40 KB/s under load — measured 3-5 s per 130 KB — so the SERVER must not download them; the
+ *  browser plays the https URL directly). True only for a 200/206 with at least one byte. */
+export async function probeChannelClip(url, fetchImpl = fetch) {
+  try {
+    const r = await fetchImpl(url, { headers: { range: 'bytes=0-1023' }, signal: AbortSignal.timeout(Number(process.env.CC_CLIP_PROBE_MS) || 4000) });
+    if (!r || !(r.status === 200 || r.status === 206)) return false;
+    const buf = Buffer.from(await r.arrayBuffer());
+    return buf.length > 0;
+  } catch { return false; }
+}
+
 export async function localizeChannelClip(url, fetchImpl = fetch) {
   try {
     const resp = await fetchImpl(url, { signal: AbortSignal.timeout(Number(process.env.CC_CLIP_FETCH_MS) || 10000) });
@@ -223,7 +235,7 @@ export const proxied = (u) => (u ? (u.startsWith('/') ? u : '/audio?u=' + encode
  * Speak `text`. priority=true for the user-facing answer/clarify (jumps every queue), false for
  * bridging/prepared material. Never rejects: resolves a same-origin path, or null.
  */
-export function ttsSpeak(text, { priority = false, userKey = 'anon', stream = false, voice = 'primary' } = {}) {
+export function ttsSpeak(text, { priority = false, userKey = 'anon', stream = false, voice = 'primary', direct = false } = {}) {
   text = ttsSafe(text);
   if (!text) return Promise.resolve(null);
   if (process.env.CC_TTS_STUB === '1') return ttsStub(text).catch(() => null);
@@ -236,7 +248,7 @@ export function ttsSpeak(text, { priority = false, userKey = 'anon', stream = fa
   if (channelReady && channelUsable()) {
     return chanLimit(() => ttsChannel(text, voice), priority, userKey).catch(() => null)
       .then(async (url) => {
-        const local = url ? await localizeChannelClip(url) : null;
+        const local = !url ? null : (direct ? ((await probeChannelClip(url)) ? url : null) : await localizeChannelClip(url));
         if (local) { channelOk(); return local; }
         if (url) channelFailed();                          // clip host unreachable -> breaker (a slow/failed CALL alone does not open it)
         return priority ? fallbackPiperFor(true) : null;   // background clips never take the scarce CPU

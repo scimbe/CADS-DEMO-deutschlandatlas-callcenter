@@ -205,9 +205,9 @@ async function handle(req, res) {
     if (!text.trim()) return jsonRes(res, 400, { error: 'empty text' });
     const budget = Math.min(Math.max(Number(b.budgetMs) || 4000, 500), 15000);
     const t0 = Date.now();
-    const au = await Promise.race([ttsSpeak(text, { priority: true, userKey }), sleep(budget).then(() => null)]);
+    const au = await Promise.race([ttsSpeak(text, { priority: true, userKey, direct: true }), sleep(budget).then(() => null)]);
     trace('speak', { chars: text.length, ms: Date.now() - t0, ok: !!au, tts: ttsHealth() });
-    return jsonRes(res, 200, { audioUrl: proxied(au) });
+    return jsonRes(res, 200, { audioUrl: au });   // https clip URL (played directly by the browser) or a local /tts/ path
   }
 
   if (req.method === 'POST' && url === '/followup') {

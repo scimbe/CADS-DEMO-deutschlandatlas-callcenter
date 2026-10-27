@@ -4,7 +4,7 @@ process.env.CC_STUB = '1';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Player, Dialog } from '../../gui/dialog-client.mjs';
-import { localizeChannelClip, channelFailed, channelOk, channelUsable, channelBreaker } from '../../gui/lib/tts.mjs';
+import { probeChannelClip, localizeChannelClip, channelFailed, channelOk, channelUsable, channelBreaker } from '../../gui/lib/tts.mjs';
 
 const tick = (ms = 0) => new Promise((r) => setTimeout(r, ms));
 function fakeAudio() {
@@ -59,4 +59,12 @@ test('server audio ready -> every sentence is played as audio, in order, first o
   d._speakAnswer(['Satz eins.', 'Satz zwei.']);
   await tick(30); await settle(player);
   assert.deepEqual(a.log, ['/Satzeins.wav', '/Satzzwei.wav']); assert.deepEqual(spoken, []);
+});
+
+test('probeChannelClip: reachable clip host -> true; reset / 404 / empty -> false (server never downloads the clip)', async () => {
+  const ok = async (u, o) => { assert.equal(o.headers.range, 'bytes=0-1023'); return { status: 206, arrayBuffer: async () => new Uint8Array(10).buffer }; };
+  assert.equal(await probeChannelClip('https://x/a.wav', ok), true);
+  assert.equal(await probeChannelClip('https://x/a.wav', async () => ({ status: 404, arrayBuffer: async () => new ArrayBuffer(0) })), false);
+  assert.equal(await probeChannelClip('https://x/a.wav', async () => { throw new TypeError('fetch failed'); }), false);
+  assert.equal(await probeChannelClip('https://x/a.wav', async () => ({ status: 200, arrayBuffer: async () => new ArrayBuffer(0) })), false);
 });
