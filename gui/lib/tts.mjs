@@ -234,7 +234,7 @@ function streamChannelClip(url) {
 
 // Background clips (pools, fillers, facts) must never hold the single channel slot while a caller
 // waits: a running call cannot be pre-empted, so they start only after the answer path was quiet.
-let priorityInFlight = 0, lastPriorityAt = 0, lastProbeOkAt = 0;
+let bgProbeFails = 0, priorityInFlight = 0, lastPriorityAt = 0, lastProbeOkAt = 0;
 async function backgroundGate(maxWaitMs = 90000) {
   const t0 = Date.now();
   while ((priorityInFlight > 0 || Date.now() - lastPriorityAt < (Number(process.env.CC_BG_QUIET_MS) || 6000)) && Date.now() - t0 < maxWaitMs) await new Promise((r) => setTimeout(r, 250));
@@ -282,18 +282,20 @@ export function ttsSpeak(text, { priority = false, userKey = 'anon', stream = fa
           // 0.8-3 s on the loaded tunnel) and verify in the background; a failure opens the breaker and
           // the player falls back to the browser voice (audio onerror).
           local = url;
-          probeChannelClip(url).then((ok) => { if (ok) lastProbeOkAt = Date.now(); else channelFailed(); });
+          probeChannelClip(url).then((ok) => { if (ok) { lastProbeOkAt = Date.now(); bgProbeFails = 0; } else if (++bgProbeFails >= 2) channelFailed(); });
         } else if (direct) { local = (await probeChannelClip(url)) ? url : null; if (local) lastProbeOkAt = Date.now(); }
         else local = await localizeChannelClip(url);
         if (priority) { priorityInFlight--; lastPriorityAt = Date.now(); console.error(`[trace] tts-stage queue=${tCall - tIn}ms call=${tGot - tCall}ms probe=${Date.now() - tGot}ms chars=${text.length} ok=${!!local}`); }
         if (local) { channelOk(); return local; }
         if (url && priority) channelFailed();                          // clip host unreachable -> breaker (a slow/failed CALL alone does not open it)
-        return priority ? fallbackPiperFor(true) : null;   // background clips never take the scarce CPU
+        // Local Piper runs at RTF ~1.8 on this host (8-13 s per sentence): by then the caller's browser voice
+        // has long been speaking. So with a channel configured, a failed user-facing clip is simply null.
+        return null;
       });
   }
   // Channel down: background material (fillers, pools) is not worth the scarce CPU — only the
   // user-facing speech (priority) is synthesised locally.
-  if (channelReady && !priority) return Promise.resolve(null);
+  if (channelReady) return Promise.resolve(null);   // channel down: the browser voice speaks (see above)
   return fallbackPiper();
 }
 
