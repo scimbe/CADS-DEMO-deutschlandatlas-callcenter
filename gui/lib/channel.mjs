@@ -20,13 +20,33 @@ const DEFAULT_TIMEOUT_MS = Number(process.env.CC_CHANNEL_TIMEOUT_MS) || 30000;
 const RESPAWN_BACKOFF_MS = [0, 500, 2000, 5000, 15000];
 const NEAR_INSTANT_MS = 3000;
 
-/** The bash line that starts one `ct-agent channel` for `service`, env sourced from CT_RELAY_ENV. */
-export function channelCommand(service, { persistent = true, env = process.env } = {}) {
+// Audio lanes: the same service reachable over more than one link channel. `primary` is the original
+// call-center <-> M4 channel; `labor` (optional) is a second channel to the labor Piper node. The
+// broker pairs exactly one initiator with one acceptor per channel, so a second TTS host needs its own
+// channel and grant rather than a second acceptor on the first one.
+export const LANES = {
+  primary: { idVar: 'CT_AUDIO_CHANNEL_ID', grantVar: 'CT_CHANNEL_GRANT_2E' },
+  labor: { idVar: 'CT_AUDIO_CHANNEL_ID_2', grantVar: 'CT_CHANNEL_GRANT_LABOR' },
+};
+
+/** The bash line that starts one `ct-agent channel` for `service` on `lane`, env sourced from CT_RELAY_ENV. */
+export function channelCommand(service, { persistent = true, env = process.env, lane = 'primary' } = {}) {
+  const l = LANES[lane] || LANES.primary;
   return `set -a; source "$CT_RELAY_ENV"; set +a; ` +
     `CT_CHANNEL_ROLE=initiate CT_CHANNEL_CALL_SERVICE=${service} CT_CHANNEL_CALL_PERSISTENT=${persistent ? '1' : '0'} CT_CHANNEL_RELAY_ONLY=1 ` +
-    `CT_CHANNEL_ID="${env.CT_AUDIO_CHANNEL_ID}" CT_CHANNEL_GRANT="$CT_CHANNEL_GRANT_2E" CT_CHANNEL_HOLDER_KEY="$CT_CHANNEL_HOLDER_KEY" CT_CHANNEL_NOISE_KEY="$CT_CHANNEL_NOISE_KEY" ` +
+    `CT_CHANNEL_ID="${env[l.idVar]}" CT_CHANNEL_GRANT="$${l.grantVar}" CT_CHANNEL_HOLDER_KEY="$CT_CHANNEL_HOLDER_KEY" CT_CHANNEL_NOISE_KEY="$CT_CHANNEL_NOISE_KEY" ` +
     `CT_CHANNEL_FRONT_DOOR=bunsenbrenner.org:443 CT_CHANNEL_FRONT_DOOR_CERT="$CT_CHANNEL_FRONT_DOOR_CERT" CT_CHANNEL_FRONT_DOOR_ONLY=1 ` +
     `CT_CHANNEL_BROKER=bunsenbrenner.org:4435 CT_CHANNEL_RELAY=bunsenbrenner.org:4436 "$CT_AGENT_BIN" channel 2>/dev/null`;
+}
+
+/** The lanes that carry audio_generation, fastest first: `labor` only when its channel id is set. */
+export function audioLanes(env = process.env) {
+  return env[LANES.labor.idVar] ? ['labor', 'primary'] : ['primary'];
+}
+/** Pool size per audio lane: the labor node runs 8 synth workers, the M4 one. */
+export function audioLaneSize(lane, env = process.env) {
+  if (lane === 'labor') return Number(env.CC_CHANNEL_POOL_LABOR) || 4;
+  return Number(env.CC_CHANNEL_CONCURRENCY) || 1;
 }
 
 /** Parse one envelope line. Returns { ok, output } / { ok:false, error } or null for a non-envelope line. */
@@ -93,9 +113,9 @@ export class ChannelClient {
    * @param {object} o        { size, timeoutMs, command, shell }
    *   command: () => bash line (default channelCommand(service)); shell: 'bash'
    */
-  constructor(service, { size = 1, timeoutMs = DEFAULT_TIMEOUT_MS, command = null, shell = 'bash' } = {}) {
-    this.service = service; this.size = Math.max(1, size); this.timeoutMs = timeoutMs; this.shell = shell;
-    this.command = command || (() => channelCommand(service));
+  constructor(service, { size = 1, timeoutMs = DEFAULT_TIMEOUT_MS, command = null, shell = 'bash', lane = 'primary' } = {}) {
+    this.service = service; this.lane = lane; this.size = Math.max(1, size); this.timeoutMs = timeoutMs; this.shell = shell;
+    this.command = command || (() => channelCommand(service, { lane }));
     this.workers = new Set(); this.queue = []; this.seq = 0; this.deaths = 0; this.lastDeath = 0; this.nextSpawnAt = 0;
     this.stats = { calls: 0, ok: 0, failed: 0, spawns: 0, deaths: 0 };
   }
@@ -156,24 +176,25 @@ export class ChannelClient {
     for (const c of this.queue.splice(0)) c.resolve(null);
   }
   status() {
-    return { service: this.service, size: this.size, live: [...this.workers].filter((w) => w.alive).length,
+    return { service: this.service, lane: this.lane, size: this.size, live: [...this.workers].filter((w) => w.alive).length,
       busy: [...this.workers].filter((w) => w.busy).length, queued: this.queue.length, lastError: this.lastError || null, ...this.stats };
   }
 }
 
 const clients = new Map();
-/** The process-wide client for `service` (size from CC_CHANNEL_POOL_<SERVICE> or `size`). */
-export function channelFor(service, size = 1) {
-  if (!clients.has(service)) {
-    const envSize = Number(process.env['CC_CHANNEL_POOL_' + service.toUpperCase()]);
-    clients.set(service, new ChannelClient(service, { size: envSize > 0 ? envSize : size }));
+/** The process-wide client for `service` on `lane` (primary size from CC_CHANNEL_POOL_<SERVICE> or `size`). */
+export function channelFor(service, size = 1, lane = 'primary') {
+  const key = lane === 'primary' ? service : service + '@' + lane;
+  if (!clients.has(key)) {
+    const envSize = lane === 'primary' ? Number(process.env['CC_CHANNEL_POOL_' + service.toUpperCase()]) : 0;
+    clients.set(key, new ChannelClient(service, { size: envSize > 0 ? envSize : size, lane }));
   }
-  return clients.get(service);
+  return clients.get(key);
 }
 export const channelStats = () => [...clients.values()].map((c) => c.status());
 /** Hold the STT and TTS processes from the start (called once the relay env is known to be set). */
 export function warmChannels() {
-  channelFor('audio_generation', Number(process.env.CC_CHANNEL_CONCURRENCY) || 1).warm();
+  for (const lane of audioLanes()) channelFor('audio_generation', audioLaneSize(lane), lane).warm();
   channelFor('speech_to_text', 2).warm(1);
 }
 export function closeChannels() { for (const c of clients.values()) c.close(); clients.clear(); }

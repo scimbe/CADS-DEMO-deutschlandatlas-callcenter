@@ -4,7 +4,7 @@ process.env.CC_STUB = '1';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Player, Dialog } from '../../gui/dialog-client.mjs';
-import { probeChannelClip, localizeChannelClip, channelFailed, channelOk, channelUsable, channelBreaker } from '../../gui/lib/tts.mjs';
+import { probeChannelClip, localizeChannelClip, channelFailed, channelOk, channelUsable, channelBreaker, laneOrder, laneDownUntil } from '../../gui/lib/tts.mjs';
 
 const tick = (ms = 0) => new Promise((r) => setTimeout(r, ms));
 function fakeAudio() {
@@ -79,4 +79,17 @@ test('a clip that fails to load is spoken by the browser voice instead of being 
   const s = p.enqueue('answer', { fallbackText: 'Satz.' }); p.fill(s, 'https://dead/a.wav');
   await settle(p); await tick(20);
   assert.deepEqual(spoken, ['Satz.']);
+});
+
+test('laneOrder: fastest idle lane first, a full lane yields, a lane in cooldown goes last', () => {
+  const st = { labor: { busy: 0, queued: 0, size: 4 }, primary: { busy: 0, queued: 0, size: 1 } };
+  const order = () => laneOrder(['labor', 'primary'], (l) => st[l]);
+  assert.deepEqual(order(), ['labor', 'primary']);
+  st.labor = { busy: 4, queued: 2, size: 4 };                       // labor saturated -> idle M4 takes the sentence
+  assert.deepEqual(order(), ['primary', 'labor']);
+  st.labor = { busy: 1, queued: 0, size: 4 };
+  laneDownUntil.set('labor', Date.now() + 60000);                   // labor just failed -> tried last
+  assert.deepEqual(order(), ['primary', 'labor']);
+  laneDownUntil.clear();
+  assert.deepEqual(order(), ['labor', 'primary']);
 });

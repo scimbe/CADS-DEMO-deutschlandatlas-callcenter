@@ -14,7 +14,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { makeLimiter } from './limiter.mjs';
 import { ttsSafe } from './text.mjs';
-import { channelFor, channelCommand } from './channel.mjs';
+import { channelFor, channelCommand, audioLanes, audioLaneSize } from './channel.mjs';
 import { TTS_PROVIDER } from './providers/config.mjs';
 import * as cloudflare from './providers/cloudflare.mjs';
 
@@ -23,10 +23,11 @@ let ttsSeq = 0;
 
 // Piper is CPU-bound: 2 concurrent synths saturate a 2-core host and make each job 10-30x slower,
 // so the default cap is 1 (raise CC_PIPER_CONCURRENCY on a bigger host). The llm2 channel is a
-// single-slot serve: concurrent calls thrash its park/re-park cycle, so it is serialised too.
+// single-slot serve: concurrent calls thrash its park/re-park cycle, so it is serialised too; a
+// second (labor) lane adds its own pool size to the channel cap.
 export const piperLimit = makeLimiter(Number(process.env.CC_PIPER_CONCURRENCY) || 1,
   { hiQueueMax: Number(process.env.CC_PIPER_QUEUE_HI) || 40, loQueueMax: Number(process.env.CC_PIPER_QUEUE_LO) || 24 });
-export const chanLimit = makeLimiter(Number(process.env.CC_CHANNEL_CONCURRENCY) || 1,
+export const chanLimit = makeLimiter(audioLanes().reduce((n, l) => n + audioLaneSize(l), 0),
   { hiQueueMax: Number(process.env.CC_CHANNEL_QUEUE_HI) || 40, loQueueMax: Number(process.env.CC_CHANNEL_QUEUE_LO) || 24 });
 
 // Clips that must survive pruning (prepared pools). Registered by bridging.mjs.
@@ -152,22 +153,45 @@ export function channelOk() { channelBreaker.failures = 0; channelBreaker.downUn
 
 // One audio_generation call over the channel. Resolves to an https clip URL or null. A channel
 // call must never hang a turn: a timeout resolves null so the caller falls back to Piper.
+// Per-lane health: a lane whose call failed is skipped for CC_LANE_COOLDOWN_MS (default 15 s), so a
+// dead labor node costs one failed call, not one per sentence.
+export const laneDownUntil = new Map();
+const laneUsable = (lane) => Date.now() >= (laneDownUntil.get(lane) || 0);
+
+/** Lanes in the order to try them: usable ones first, then by load (busy+queued per slot), fastest
+ *  lane (audioLanes order) on a tie. A lane in cooldown is still tried last rather than not at all. */
+export function laneOrder(lanes = audioLanes(), statusOf = (l) => channelFor('audio_generation', audioLaneSize(l), l).status()) {
+  const load = (l) => { const st = statusOf(l); return (st.busy + st.queued) / Math.max(1, st.size); };
+  return lanes.map((l, i) => ({ l, i, up: laneUsable(l), full: load(l) >= 1 }))
+    .sort((a, b) => (b.up - a.up) || (a.full - b.full) || (a.i - b.i)).map((x) => x.l);
+}
+
+async function ttsOnLane(lane, text, voice) {
+  // The M4 TTS backend answers "ERROR: synthesis failed ... HTTP Error 503" while it is busy (measured:
+  // 3 of 4 back-to-back calls). That is transient: retry quickly instead of dropping to the browser voice.
+  const delays = lane === 'primary' ? [0, 350, 700, 1200] : [0];
+  for (let i = 0; i < delays.length; i++) {
+    if (delays[i]) await new Promise((r) => setTimeout(r, delays[i]));
+    const out = await channelFor('audio_generation', audioLaneSize(lane), lane)
+      .call({ text, voice }, Math.min(Number(process.env.CC_CHANNEL_TIMEOUT_MS) || 12000, 12000));
+    const url = (out || '').trim().split('\n').pop() || '';
+    if (/^https:\/\//.test(url.trim())) return url.trim();
+    if (!/503|busy|unavailable|timeout/i.test(out || '') && out != null) break;   // a real error: no point retrying
+  }
+  return null;
+}
+
 // Default: over the HELD channel process (persistent call mode, channel.mjs): one paired session
 // per process life instead of a ~5.5 s join+pair+Noise per clip — the difference between an invite
 // or clarify question that is spoken and one that arrives after the caller has moved on.
-// CC_CHANNEL_MODE=oneshot keeps the spawn-per-call path.
+// With a labor lane configured each sentence goes to the least-loaded lane and falls over to the
+// other one on failure. CC_CHANNEL_MODE=oneshot keeps the spawn-per-call path (primary lane only).
 async function ttsChannel(text, voice = 'primary') {
   if ((process.env.CC_CHANNEL_MODE || 'persistent') !== 'oneshot') {
-    // The M4 TTS backend answers "ERROR: synthesis failed ... HTTP Error 503" while it is busy (measured:
-    // 3 of 4 back-to-back calls). That is transient: retry quickly instead of dropping to the browser voice.
-    const delays = [0, 350, 700, 1200];
-    for (let i = 0; i < delays.length; i++) {
-      if (delays[i]) await new Promise((r) => setTimeout(r, delays[i]));
-      const out = await channelFor('audio_generation', Number(process.env.CC_CHANNEL_CONCURRENCY) || 1)
-        .call({ text, voice }, Math.min(Number(process.env.CC_CHANNEL_TIMEOUT_MS) || 12000, 12000));
-      const url = (out || '').trim().split('\n').pop() || '';
-      if (/^https:\/\//.test(url.trim())) return url.trim();
-      if (!/503|busy|unavailable|timeout/i.test(out || '') && out != null) break;   // a real error: no point retrying
+    for (const lane of laneOrder()) {
+      const url = await ttsOnLane(lane, text, voice);
+      if (url) { laneDownUntil.delete(lane); return url; }
+      laneDownUntil.set(lane, Date.now() + (Number(process.env.CC_LANE_COOLDOWN_MS) || 15000));
     }
     return null;
   }
