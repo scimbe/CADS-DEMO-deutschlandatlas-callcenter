@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { ChannelClient, parseEnvelope, channelCommand } from '../../gui/lib/channel.mjs';
+import { ChannelClient, parseEnvelope, channelCommand, audioLanes, audioLaneSize } from '../../gui/lib/channel.mjs';
 
 const FAKE = join(dirname(fileURLToPath(import.meta.url)), 'fake-ct-agent.mjs');
 const fake = (envs = '') => () => `${envs} node "${FAKE}"`;
@@ -140,4 +140,20 @@ test('silentWav builds a valid 16-bit mono PCM WAV of the requested length', asy
   assert.equal(b.readUInt16LE(22), 1, 'mono'); assert.equal(b.readUInt32LE(24), 16000); assert.equal(b.readUInt16LE(34), 16);
   assert.equal(b.readUInt32LE(40), 16000, '0.5 s of 16-bit samples'); assert.equal(b.length, 44 + 16000);
   assert.ok(b.subarray(44).every((x) => x === 0), 'silence');
+});
+
+test('channelCommand: the labor lane uses its own channel id and grant, primary stays unchanged', () => {
+  const env = { CT_AUDIO_CHANNEL_ID: 'chan-m4', CT_AUDIO_CHANNEL_ID_2: 'chan-labor' };
+  const p = channelCommand('audio_generation', { env });
+  assert.ok(p.includes('CT_CHANNEL_ID="chan-m4"') && p.includes('CT_CHANNEL_GRANT="$CT_CHANNEL_GRANT_2E"'));
+  const l = channelCommand('audio_generation', { env, lane: 'labor' });
+  assert.ok(l.includes('CT_CHANNEL_ID="chan-labor"') && l.includes('CT_CHANNEL_GRANT="$CT_CHANNEL_GRANT_LABOR"'), l);
+});
+
+test('audioLanes: labor first only when its channel id is set; pool sizes per lane', () => {
+  assert.deepEqual(audioLanes({ CT_AUDIO_CHANNEL_ID: 'a' }), ['primary']);
+  assert.deepEqual(audioLanes({ CT_AUDIO_CHANNEL_ID: 'a', CT_AUDIO_CHANNEL_ID_2: 'b' }), ['labor', 'primary']);
+  assert.equal(audioLaneSize('labor', {}), 4);
+  assert.equal(audioLaneSize('labor', { CC_CHANNEL_POOL_LABOR: '6' }), 6);
+  assert.equal(audioLaneSize('primary', {}), 1);
 });
