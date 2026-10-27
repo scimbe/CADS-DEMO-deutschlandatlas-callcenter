@@ -158,10 +158,18 @@ export function channelOk() { channelBreaker.failures = 0; channelBreaker.downUn
 // CC_CHANNEL_MODE=oneshot keeps the spawn-per-call path.
 async function ttsChannel(text, voice = 'primary') {
   if ((process.env.CC_CHANNEL_MODE || 'persistent') !== 'oneshot') {
-    const out = await channelFor('audio_generation', Number(process.env.CC_CHANNEL_CONCURRENCY) || 1)
-      .call({ text, voice }, Math.min(Number(process.env.CC_CHANNEL_TIMEOUT_MS) || 12000, 12000));
-    const url = (out || '').trim().split('\n').pop() || '';
-    return /^https:\/\//.test(url.trim()) ? url.trim() : null;
+    // The M4 TTS backend answers "ERROR: synthesis failed ... HTTP Error 503" while it is busy (measured:
+    // 3 of 4 back-to-back calls). That is transient: retry quickly instead of dropping to the browser voice.
+    const delays = [0, 350, 700, 1200];
+    for (let i = 0; i < delays.length; i++) {
+      if (delays[i]) await new Promise((r) => setTimeout(r, delays[i]));
+      const out = await channelFor('audio_generation', Number(process.env.CC_CHANNEL_CONCURRENCY) || 1)
+        .call({ text, voice }, Math.min(Number(process.env.CC_CHANNEL_TIMEOUT_MS) || 12000, 12000));
+      const url = (out || '').trim().split('\n').pop() || '';
+      if (/^https:\/\//.test(url.trim())) return url.trim();
+      if (!/503|busy|unavailable|timeout/i.test(out || '') && out != null) break;   // a real error: no point retrying
+    }
+    return null;
   }
   return ttsChannelOneShot(text, voice);
 }
@@ -198,10 +206,9 @@ export async function probeChannelClip(url, fetchImpl = fetch) {
   try {
     const r = await fetchImpl(url, { headers: { range: 'bytes=0-1023' }, signal: AbortSignal.timeout(Number(process.env.CC_CLIP_PROBE_MS) || 4000) });
     if (!r || !(r.status === 200 || r.status === 206)) return false;
-    if (r.body && r.body.getReader) {                      // the clip server ignores Range: read the first chunk, drop the rest
-      const rd = r.body.getReader(); const { value } = await rd.read(); try { await rd.cancel(); } catch {}
-      return !!(value && value.length > 0);
-    }
+    // Headers are enough (dead host = reset/refused, wrong clip = 404): reading the body took 1-4 s on the
+    // loaded tunnel and made healthy clips look dead. Drop the body at once.
+    if (r.body && r.body.cancel) { try { await r.body.cancel(); } catch {} return true; }
     return Buffer.from(await r.arrayBuffer()).length > 0;
   } catch { return false; }
 }
@@ -232,6 +239,26 @@ function streamChannelClip(url) {
   return '/tts-stream/' + id;
 }
 
+// Background clips (pools, fillers, facts) must never hold the single channel slot while a caller
+// waits: a running call cannot be pre-empted, so they start only after the answer path was quiet.
+let bgProbeFails = 0, priorityInFlight = 0, lastPriorityAt = 0, lastProbeOkAt = 0;
+async function backgroundGate(maxWaitMs = 90000) {
+  const t0 = Date.now();
+  while ((priorityInFlight > 0 || Date.now() - lastPriorityAt < (Number(process.env.CC_BG_QUIET_MS) || 6000)) && Date.now() - t0 < maxWaitMs) await new Promise((r) => setTimeout(r, 250));
+}
+
+// Keep the whole TTS path (ct-agent worker, relay, M4 piper-serve) warm: a cold first call took 5-11 s.
+let keepaliveTimer = null;
+export function startChannelKeepalive(intervalMs = Number(process.env.CC_KEEPALIVE_MS) || 40000) {
+  if (keepaliveTimer || process.env.CC_TTS !== '1' || !process.env.CT_AGENT_BIN) return;
+  keepaliveTimer = setInterval(() => {
+    if (priorityInFlight > 0 || Date.now() - lastPriorityAt < 15000 || !channelUsable()) return;
+    chanLimit(() => ttsChannel('Ja.', 'primary'), false, 'system').then((u) => { if (u) lastKeepaliveAt = Date.now(); }).catch(() => {});
+  }, intervalMs);
+  if (keepaliveTimer.unref) keepaliveTimer.unref();
+}
+let lastKeepaliveAt = 0;
+
 export const proxied = (u) => (u ? (u.startsWith('/') ? u : '/audio?u=' + encodeURIComponent(u)) : null);
 
 /**
@@ -249,17 +276,33 @@ export function ttsSpeak(text, { priority = false, userKey = 'anon', stream = fa
   const fallbackPiperFor = (pr) => (piperReady ? ttsLocalPiper(text, pr, userKey).catch(() => null) : Promise.resolve(null));
   const fallbackPiper = () => fallbackPiperFor(priority);
   if (channelReady && channelUsable()) {
-    return chanLimit(() => ttsChannel(text, voice), priority, userKey).catch(() => null)
+    const tIn = Date.now(); let tCall = tIn, tGot = tIn;
+    if (priority) { priorityInFlight++; lastPriorityAt = tIn; }
+    return (priority ? Promise.resolve() : backgroundGate())
+      .then(() => chanLimit(() => { tCall = Date.now(); return ttsChannel(text, voice); }, priority, userKey)).catch(() => null)
       .then(async (url) => {
-        const local = !url ? null : (direct ? ((await probeChannelClip(url)) ? url : null) : await localizeChannelClip(url));
+        tGot = Date.now();
+        let local;
+        if (!url) local = null;
+        else if (direct && Date.now() - lastProbeOkAt < 60000) {
+          // Optimistic: the clip host answered a probe < 60 s ago -> hand the URL out NOW (the probe costs
+          // 0.8-3 s on the loaded tunnel) and verify in the background; a failure opens the breaker and
+          // the player falls back to the browser voice (audio onerror).
+          local = url;
+          probeChannelClip(url).then((ok) => { if (ok) { lastProbeOkAt = Date.now(); bgProbeFails = 0; } else if (++bgProbeFails >= 2) channelFailed(); });
+        } else if (direct) { local = (await probeChannelClip(url)) ? url : null; if (local) lastProbeOkAt = Date.now(); }
+        else local = await localizeChannelClip(url);
+        if (priority) { priorityInFlight--; lastPriorityAt = Date.now(); console.error(`[trace] tts-stage queue=${tCall - tIn}ms call=${tGot - tCall}ms probe=${Date.now() - tGot}ms chars=${text.length} ok=${!!local}`); }
         if (local) { channelOk(); return local; }
         if (url && priority) channelFailed();                          // clip host unreachable -> breaker (a slow/failed CALL alone does not open it)
-        return priority ? fallbackPiperFor(true) : null;   // background clips never take the scarce CPU
+        // Local Piper runs at RTF ~1.8 on this host (8-13 s per sentence): by then the caller's browser voice
+        // has long been speaking. So with a channel configured, a failed user-facing clip is simply null.
+        return null;
       });
   }
   // Channel down: background material (fillers, pools) is not worth the scarce CPU — only the
   // user-facing speech (priority) is synthesised locally.
-  if (channelReady && !priority) return Promise.resolve(null);
+  if (channelReady) return Promise.resolve(null);   // channel down: the browser voice speaks (see above)
   return fallbackPiper();
 }
 

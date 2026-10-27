@@ -67,4 +67,16 @@ test('probeChannelClip: reachable clip host -> true; reset / 404 / empty -> fals
   assert.equal(await probeChannelClip('https://x/a.wav', async () => ({ status: 404, arrayBuffer: async () => new ArrayBuffer(0) })), false);
   assert.equal(await probeChannelClip('https://x/a.wav', async () => { throw new TypeError('fetch failed'); }), false);
   assert.equal(await probeChannelClip('https://x/a.wav', async () => ({ status: 200, arrayBuffer: async () => new ArrayBuffer(0) })), false);
+  let cancelled = false;   // real fetch: headers are enough, the body is dropped, not read
+  assert.equal(await probeChannelClip('https://x/a.wav', async () => ({ status: 200, body: { cancel: async () => { cancelled = true; } }, arrayBuffer: async () => { throw new Error('must not read the body'); } })), true);
+  assert.ok(cancelled);
+});
+
+test('a clip that fails to load is spoken by the browser voice instead of being skipped', async () => {
+  const spoken = [], a = fakeAudio();
+  a.load = () => { setTimeout(() => a.onerror && a.onerror(new Error('404')), 1); };
+  const p = new Player(a, { speak: async (t) => { spoken.push(t); } });
+  const s = p.enqueue('answer', { fallbackText: 'Satz.' }); p.fill(s, 'https://dead/a.wav');
+  await settle(p); await tick(20);
+  assert.deepEqual(spoken, ['Satz.']);
 });

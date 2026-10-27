@@ -79,7 +79,13 @@ export class Player {
     const a = this.audio;
     let started = false, advanced = false;
     const advance = () => { if (advanced) return; advanced = true; this.busy = false; it._end('played'); this.hooks.onSpeaking && this.hooks.onSpeaking(false, it); this.timers.set(() => this.pump(), 0); };
-    a.onended = advance; a.onerror = advance;
+    // A failing clip (dead host after an optimistic hand-out) is spoken by the browser instead of skipped.
+    a.onended = advance;
+    a.onerror = () => {
+      if (advanced) return;
+      if (it.fallbackText && this.hooks.speak) { advanced = true; Promise.resolve(this.hooks.speak(it.fallbackText)).then(finishAfterSpeech, finishAfterSpeech); } else advance();
+    };
+    const finishAfterSpeech = () => { this.busy = false; it._end('played'); this.hooks.onSpeaking && this.hooks.onSpeaking(false, it); this.timers.set(() => this.pump(), 0); };
     const start = () => { if (started || this.paused) return; started = true;
       const pr = a.play(); if (pr && pr.catch) pr.catch(() => { if (!a.ended && (a.paused || a.currentTime === 0)) advance(); }); };
     a.oncanplaythrough = () => { a.oncanplaythrough = null; if (!this.paused) start(); };

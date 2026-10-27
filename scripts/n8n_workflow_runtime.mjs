@@ -287,6 +287,13 @@ async function main() {
   trace("TIMING arcgis-total", (Date.now() - _tArc) + "ms");
   // Build Phrasing Prompt
   const phrasePrompt = runCode("Build Phrasing Prompt", phrasingInput);
+  if (phrasePrompt.hasRealData) {
+    // Several rows for one name (kreisfreie Stadt + gleichnamiger Landkreis) made the answer vague
+    // ("je nach Gebietskategorie unterschiedliche Werte"). Answer with the named place first.
+    phrasePrompt.llmPhraseSystem += "\n\nWICHTIG: Enthalten die Daten mehrere Zeilen zum selben Namen (z. B. kreisfreie Stadt und gleichnamiger Landkreis), " +
+      "nenne zuerst den Wert der Stadt bzw. des genannten Ortes mit der Zahl in einem Satz, den anderen Wert höchstens kurz danach. " +
+      "Keine Formulierungen wie 'je nach Gebietskategorie unterschiedliche Werte'. Beginne direkt mit der Zahl-Aussage.";
+  }
 
   // LLM Phrase Answer -- REAL call to the litellm-proxy
   const _tPh = Date.now();
