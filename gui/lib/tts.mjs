@@ -158,10 +158,18 @@ export function channelOk() { channelBreaker.failures = 0; channelBreaker.downUn
 // CC_CHANNEL_MODE=oneshot keeps the spawn-per-call path.
 async function ttsChannel(text, voice = 'primary') {
   if ((process.env.CC_CHANNEL_MODE || 'persistent') !== 'oneshot') {
-    const out = await channelFor('audio_generation', Number(process.env.CC_CHANNEL_CONCURRENCY) || 1)
-      .call({ text, voice }, Math.min(Number(process.env.CC_CHANNEL_TIMEOUT_MS) || 12000, 12000));
-    const url = (out || '').trim().split('\n').pop() || '';
-    return /^https:\/\//.test(url.trim()) ? url.trim() : null;
+    // The M4 TTS backend answers "ERROR: synthesis failed ... HTTP Error 503" while it is busy (measured:
+    // 3 of 4 back-to-back calls). That is transient: retry quickly instead of dropping to the browser voice.
+    const delays = [0, 350, 700, 1200];
+    for (let i = 0; i < delays.length; i++) {
+      if (delays[i]) await new Promise((r) => setTimeout(r, delays[i]));
+      const out = await channelFor('audio_generation', Number(process.env.CC_CHANNEL_CONCURRENCY) || 1)
+        .call({ text, voice }, Math.min(Number(process.env.CC_CHANNEL_TIMEOUT_MS) || 12000, 12000));
+      const url = (out || '').trim().split('\n').pop() || '';
+      if (/^https:\/\//.test(url.trim())) return url.trim();
+      if (!/503|busy|unavailable|timeout/i.test(out || '') && out != null) break;   // a real error: no point retrying
+    }
+    return null;
   }
   return ttsChannelOneShot(text, voice);
 }
