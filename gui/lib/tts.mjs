@@ -250,7 +250,7 @@ export function ttsSpeak(text, { priority = false, userKey = 'anon', stream = fa
       .then(async (url) => {
         const local = !url ? null : (direct ? ((await probeChannelClip(url)) ? url : null) : await localizeChannelClip(url));
         if (local) { channelOk(); return local; }
-        if (url) channelFailed();                          // clip host unreachable -> breaker (a slow/failed CALL alone does not open it)
+        if (url && priority) channelFailed();                          // clip host unreachable -> breaker (a slow/failed CALL alone does not open it)
         return priority ? fallbackPiperFor(true) : null;   // background clips never take the scarce CPU
       });
   }
