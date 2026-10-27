@@ -22,5 +22,15 @@
  {"q":"Wie viele Einwohner hat Nordrhein-Westfalen?","table":"bev_ue65"},
  {"q":"Wie hoch ist die Straftatenquote in Hannover?","table":"straft|krim|st_"},
  {"q":"Wie hoch ist die Steuereinnahmekraft in Düsseldorf?","table":"einnkr"},
- {"q":"Wie hoch ist die Bevölkerungsdichte in Essen?","table":"bev_ue65"}
+ {"q":"Wie hoch ist die Bevölkerungsdichte in Essen?","table":"bev_ue65"},
+ {"q":"Wie weit ist es in Bremen zur nächsten Apotheke?","table":"p_apo"},
+ {"q":"Wie hoch ist die Miete in Köln?","table":"preis_miet"},
+ {"q":"Wie viele Wohnungen stehen in Leipzig leer?","table":"wohn_leer"},
+ {"q":"Wie viel kostet Bauland in München?","table":"preis_baul"},
+ {"q":"Wie lange fährt man in Freiburg zum nächsten Hallenbad?","table":"p_hbad"},
+ {"q":"Wie weit ist die nächste Ladesäule in Kiel?","table":"elade"},
+ {"q":"Wie lange braucht man in Rostock mit Bus und Bahn zum nächsten Mittelzentrum?","table":"p_ozmz_oev"},
+ {"q":"Wie weit ist das nächste Krankenhaus in Göttingen?","table":"p_kh_gru"},
+ {"q":"Wie weit ist der nächste Supermarkt in Passau?","table":"p_markt"},
+ {"q":"Wie lange fährt man in Trier zur nächsten Grundschule?","table":"p_grunds"}
 ]
