@@ -198,8 +198,11 @@ export async function probeChannelClip(url, fetchImpl = fetch) {
   try {
     const r = await fetchImpl(url, { headers: { range: 'bytes=0-1023' }, signal: AbortSignal.timeout(Number(process.env.CC_CLIP_PROBE_MS) || 4000) });
     if (!r || !(r.status === 200 || r.status === 206)) return false;
-    const buf = Buffer.from(await r.arrayBuffer());
-    return buf.length > 0;
+    if (r.body && r.body.getReader) {                      // the clip server ignores Range: read the first chunk, drop the rest
+      const rd = r.body.getReader(); const { value } = await rd.read(); try { await rd.cancel(); } catch {}
+      return !!(value && value.length > 0);
+    }
+    return Buffer.from(await r.arrayBuffer()).length > 0;
   } catch { return false; }
 }
 
