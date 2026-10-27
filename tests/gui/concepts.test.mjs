@@ -28,3 +28,32 @@ test('speechChunks: a long first sentence gets a short first chunk; short ones s
   assert.ok(c[0].length < 45, c[0]); assert.equal(c.length, 3);
   assert.deepEqual(speechChunks('In Kiel sind es 8,5 Prozent.'), ['In Kiel sind es 8,5 Prozent.']);
 });
+
+import { cleanSpoken } from '../../gui/lib/text.mjs';
+test('income is NOT a population question (live defect: income -> 65+ share)', () => {
+  const r = rewriteQuery('Wie hoch ist das Einkommen in Köln?');
+  assert.match(r.query, /verfügbare Einkommen privater Haushalte je Einwohner in Köln/); assert.equal(r.prefix, '');
+  for (const q of ['Wie hoch ist das verfügbare Einkommen je Einwohner in Köln?', 'Wie hoch ist die Steuereinnahmekraft je Einwohner in Köln?',
+    'Wie viele Hausärzte gibt es pro 100.000 Einwohner in Köln?', 'Wie hoch sind die kommunalen Kassenkredite je Einwohner in Köln?'])
+    assert.deepEqual(rewriteQuery(q), { query: q, prefix: '' }, q);
+});
+test('Gehalt/Lohn/Kaufkraft map to the income indicator and say so', () => {
+  for (const w of ['Gehalt', 'Kaufkraft', 'Lohn']) { const r = rewriteQuery(`Wie hoch ist die ${w} in Stuttgart?`); assert.match(r.query, /verfügbare Einkommen/); assert.match(r.prefix, /nicht/); }
+});
+test('only genuine population intents are remapped', () => {
+  assert.match(rewriteQuery('Wie viele Einwohner hat Frankfurt?').query, /65-Jährigen/);
+  assert.equal(rewriteQuery('Wie hoch ist die Wahlbeteiligung in Köln?').prefix, '');
+  assert.equal(rewriteQuery('Wie hoch ist die Breitbandverfügbarkeit in Stuttgart?').prefix, '');
+});
+test('cleanSpoken strips control characters so no body can break strict JSON consumers', () => {
+  const t = cleanSpoken('Zeile eins' + String.fromCharCode(10) + 'Zeile' + String.fromCharCode(9, 0, 31, 0x2028) + 'zwei');
+  for (const ch of t) assert.ok(ch.charCodeAt(0) > 31 && ch.charCodeAt(0) !== 0x2028);
+  assert.equal(t, 'Zeile eins Zeile zwei');
+  assert.doesNotThrow(() => JSON.parse(JSON.stringify({ a: t })));
+});
+
+test('vocabulary aliases reach the catalog wording (Wahlbeteiligung, Verschuldung)', () => {
+  assert.match(rewriteQuery('Wie hoch ist die Wahlbeteiligung in Köln?').query, /Bundestagswahlbeteiligung 2021 in Köln/);
+  const v = rewriteQuery('Wie hoch ist die Verschuldung in Köln?'); assert.match(v.query, /überschuldeter Personen.*Köln/); assert.match(v.prefix, /überschuldeter Personen/);
+  assert.equal(rewriteQuery('Wie hoch sind die kommunalen Kassenkredite je Einwohner in Köln?').prefix, '');
+});

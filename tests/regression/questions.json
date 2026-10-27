@@ -1,1 +1,26 @@
-["Wie viele Einwohner hat Bremen?","Wie hoch ist die Arbeitslosenquote in Hamburg?","Wie viele Ärzte gibt es in München?","Wie hoch ist das Durchschnittsalter in Leipzig?","Wie hoch ist das verfügbare Einkommen in Köln?","Wie hoch ist der Ausländeranteil in Frankfurt?","Wie viele Hausärzte gibt es je 100.000 Einwohner in Berlin?","Wie hoch ist die Arbeitslosenquote in Bayern?","Wie hoch ist der Anteil der über 65-Jährigen in Dresden?","Wie hoch ist die Straftatenquote in Hannover?","Wie viele Einwohner hat Nordrhein-Westfalen?","Wie hoch ist die Kinderbetreuungsquote in Stuttgart?","Wie hoch ist die Steuereinnahmekraft in Düsseldorf?","Wie viele Schulabgänger ohne Abschluss gibt es in Kiel?","Wie hoch ist die Bevölkerungsdichte in Essen?"]
+[
+ {"q":"Wie viele Einwohner hat Bremen?","table":"bev_ue65"},
+ {"q":"Wie hoch ist die Arbeitslosenquote in Hamburg?","table":"alq_"},
+ {"q":"Wie viele Ärzte gibt es in München?","table":"v_harzt"},
+ {"q":"Wie hoch ist das Durchschnittsalter in Leipzig?","table":"bev_ue65"},
+ {"q":"Wie hoch ist das Einkommen in Köln?","table":"hh_veink"},
+ {"q":"Wie hoch ist das Einkommen in Frankfurt?","table":"hh_veink"},
+ {"q":"Wie hoch ist das Einkommen in Stuttgart?","table":"hh_veink"},
+ {"q":"Wie hoch ist der Lohn in Köln?","table":"hh_veink"},
+ {"q":"Wie hoch ist die Kaufkraft in Frankfurt?","table":"hh_veink"},
+ {"q":"Wie hoch ist die Kaufkraft in Stuttgart?","table":"hh_veink"},
+ {"q":"Wie hoch ist die Verschuldung in Köln?","table":"schulden|kasskred"},
+ {"q":"Wie hoch sind die Schulden in Frankfurt?","table":"schulden|kasskred"},
+ {"q":"Wie hoch ist der Anteil überschuldeter Personen in Stuttgart?","table":"schulden"},
+ {"q":"Wie gut ist das Breitband in Köln?","table":"breitb|lte"},
+ {"q":"Wie schnell ist das Internet in Frankfurt?","table":"breitb"},
+ {"q":"Wie hoch ist die Breitbandverfügbarkeit in Stuttgart?","table":"breitb|lte"},
+ {"q":"Wie hoch ist die Wahlbeteiligung in Köln?","table":"wahl_beteil"},
+ {"q":"Wie hoch war die Wahlbeteiligung in Frankfurt?","table":"wahl_beteil"},
+ {"q":"Wie hoch ist die Wahlbeteiligung in Stuttgart?","table":"wahl_beteil"},
+ {"q":"Wie hoch ist die Arbeitslosenquote in Bayern?","table":"alq_"},
+ {"q":"Wie viele Einwohner hat Nordrhein-Westfalen?","table":"bev_ue65"},
+ {"q":"Wie hoch ist die Straftatenquote in Hannover?","table":"straft|krim|st_"},
+ {"q":"Wie hoch ist die Steuereinnahmekraft in Düsseldorf?","table":"einnkr"},
+ {"q":"Wie hoch ist die Bevölkerungsdichte in Essen?","table":"bev_ue65"}
+]

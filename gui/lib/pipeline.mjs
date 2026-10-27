@@ -11,7 +11,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { makeLimiter } from './limiter.mjs';
 import { STUB } from './llm.mjs';
-import { placeFromQuery } from './text.mjs';
+import { placeFromQuery, cleanSpoken } from './text.mjs';
 import { rewriteQuery } from './concepts.mjs';
 
 export const pipeLimit = makeLimiter(Number(process.env.CC_PIPELINE_CONCURRENCY) || 3,
@@ -114,7 +114,7 @@ export function answerFor(query, priority = false, userKey = 'anon') {
       meta = r.final?.meta || null; ok = r.ok; err = r.ok ? null : (r.err || 'pipeline failed');
       // no second 'narrate' LLM round trip: the phrasing step already produced spoken German
       // (it cost 1.5-3 s of every turn for cosmetics)
-      answer = rawAnswer && rw.prefix ? rw.prefix + rawAnswer : rawAnswer;
+      answer = rawAnswer ? cleanSpoken(rw.prefix ? rw.prefix + rawAnswer : rawAnswer) : null;
       if (ok && answer && meta && meta.table && meta.has_real_data !== false) { diskPut(key, { answer, meta }); rememberVerified(key); }
     }
     return { ok, answer, meta, reused, err };
