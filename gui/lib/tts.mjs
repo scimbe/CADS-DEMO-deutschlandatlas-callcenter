@@ -239,7 +239,7 @@ export function ttsSpeak(text, { priority = false, userKey = 'anon', stream = fa
         const local = url ? await localizeChannelClip(url) : null;
         if (local) { channelOk(); return local; }
         channelFailed();                                   // call failed or the clip host is unreachable
-        return fallbackPiperFor(priority);
+        return priority ? fallbackPiperFor(true) : null;   // background clips never take the scarce CPU
       });
   }
   // Channel down: background material (fillers, pools) is not worth the scarce CPU — only the
