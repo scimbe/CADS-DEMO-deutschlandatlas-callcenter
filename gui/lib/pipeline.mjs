@@ -10,7 +10,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { makeLimiter } from './limiter.mjs';
-import { narrate, STUB } from './llm.mjs';
+import { STUB } from './llm.mjs';
 import { placeFromQuery } from './text.mjs';
 
 export const pipeLimit = makeLimiter(Number(process.env.CC_PIPELINE_CONCURRENCY) || 3,
@@ -110,7 +110,9 @@ export function answerFor(query, priority = false, userKey = 'anon') {
       catch (e) { r = { ok: false, final: null, err: (e && e.code) || (e && e.message) || 'pipeline failed' }; }
       const rawAnswer = r.final?.text || r.final?.answer || null;
       meta = r.final?.meta || null; ok = r.ok; err = r.ok ? null : (r.err || 'pipeline failed');
-      answer = rawAnswer ? await narrate(rawAnswer, 'answer') : null;
+      // no second 'narrate' LLM round trip: the phrasing step already produced spoken German
+      // (it cost 1.5-3 s of every turn for cosmetics)
+      answer = rawAnswer;
       if (ok && answer && meta && meta.table && meta.has_real_data !== false) { diskPut(key, { answer, meta }); rememberVerified(key); }
     }
     return { ok, answer, meta, reused, err };

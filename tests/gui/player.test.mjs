@@ -89,7 +89,8 @@ function fakeApi({ answerMs = 120, precise = true } = {}) {
       return precise ? { precise: true, kind: 'neu', best_guess: query, options: [], slots: { ort: 'Kiel', indikator: 'Arbeitslosenquote' } }
         : { precise: false, kind: 'neu', clarify: 'Welcher Ort?', best_guess: 'Wie hoch ist die Arbeitslosenquote in Kiel?', options: ['Wie hoch ist die Arbeitslosenquote in Lübeck?'], slots: {}, clarifyAudioUrl: '/clarify.wav' }; },
     bridge: async (kind, query) => { calls.push(['bridge', kind]); const c = clip(kind, ++b); if (kind === 'fact') { c.url = 'https://de.wikipedia.org/x'; c.title = 'Kiel'; } return c; },
-    answer: async (query) => { calls.push(['answer', query]); await tick(answerMs); return { ok: true, answer: 'In Kiel 5,1 Prozent.', meta: { table: 't', has_real_data: true, place_resolved: 'Kiel' }, audioUrl: '/answer.wav' }; },
+    answer: async (query) => { calls.push(['answer', query]); await tick(answerMs); return { ok: true, answer: 'In Kiel 5,1 Prozent.', meta: { table: 't', has_real_data: true, place_resolved: 'Kiel' }, audioUrl: null, sentences: ['In Kiel 5,1 Prozent.'] }; },
+    speak: async () => ({ audioUrl: '/answer.wav' }),
     followup: async () => { calls.push(['followup']); await tick(20); return { invite: 'Auch Lübeck?', suggestions: ['Wie hoch ist die Arbeitslosenquote in Lübeck?'], inviteAudioUrl: '/invite.wav' }; },
   };
 }
