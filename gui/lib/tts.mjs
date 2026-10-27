@@ -198,10 +198,9 @@ export async function probeChannelClip(url, fetchImpl = fetch) {
   try {
     const r = await fetchImpl(url, { headers: { range: 'bytes=0-1023' }, signal: AbortSignal.timeout(Number(process.env.CC_CLIP_PROBE_MS) || 4000) });
     if (!r || !(r.status === 200 || r.status === 206)) return false;
-    if (r.body && r.body.getReader) {                      // the clip server ignores Range: read the first chunk, drop the rest
-      const rd = r.body.getReader(); const { value } = await rd.read(); try { await rd.cancel(); } catch {}
-      return !!(value && value.length > 0);
-    }
+    // Headers are enough (dead host = reset/refused, wrong clip = 404): reading the body took 1-4 s on the
+    // loaded tunnel and made healthy clips look dead. Drop the body at once.
+    if (r.body && r.body.cancel) { try { await r.body.cancel(); } catch {} return true; }
     return Buffer.from(await r.arrayBuffer()).length > 0;
   } catch { return false; }
 }
