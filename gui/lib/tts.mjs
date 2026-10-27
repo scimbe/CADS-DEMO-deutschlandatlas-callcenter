@@ -159,7 +159,7 @@ export function channelOk() { channelBreaker.failures = 0; channelBreaker.downUn
 async function ttsChannel(text, voice = 'primary') {
   if ((process.env.CC_CHANNEL_MODE || 'persistent') !== 'oneshot') {
     const out = await channelFor('audio_generation', Number(process.env.CC_CHANNEL_CONCURRENCY) || 1)
-      .call({ text, voice }, Math.min(Number(process.env.CC_CHANNEL_TIMEOUT_MS) || 6000, 6000));
+      .call({ text, voice }, Math.min(Number(process.env.CC_CHANNEL_TIMEOUT_MS) || 12000, 12000));
     const url = (out || '').trim().split('\n').pop() || '';
     return /^https:\/\//.test(url.trim()) ? url.trim() : null;
   }
@@ -238,7 +238,7 @@ export function ttsSpeak(text, { priority = false, userKey = 'anon', stream = fa
       .then(async (url) => {
         const local = url ? await localizeChannelClip(url) : null;
         if (local) { channelOk(); return local; }
-        channelFailed();                                   // call failed or the clip host is unreachable
+        if (url) channelFailed();                          // clip host unreachable -> breaker (a slow/failed CALL alone does not open it)
         return priority ? fallbackPiperFor(true) : null;   // background clips never take the scarce CPU
       });
   }
