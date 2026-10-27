@@ -38,7 +38,7 @@ async function chat(body) {
     try {
       const resp = await fetch(base + '/chat/completions', {
         method: 'POST', headers: { authorization: 'Bearer ' + key, 'content-type': 'application/json' },
-        body: JSON.stringify({ model, ...body }),
+        body: JSON.stringify({ model, ...(/^local-/.test(model) ? { think: false } : {}), ...body }),   // thinking off: dialogue turns must not burn tokens on reasoning
       });
       if (!resp.ok) { if (resp.status >= 500 && attempt < RETRIES) { await sleep(300 * attempt); continue; } return null; }
       const j = await resp.json();
