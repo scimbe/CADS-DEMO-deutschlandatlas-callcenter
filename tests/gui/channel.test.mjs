@@ -133,6 +133,31 @@ test('warm() holds idle processes before any call, so the first call pays no spa
   } finally { c.close(); }
 });
 
+test('a warmed pool refills itself after a worker dies, before the next call', async () => {
+  const c = new ChannelClient('t', { size: 2, command: fake('FAKE_DELAY_MS=10'), timeoutMs: 2000 });
+  try {
+    assert.equal(c.warm(), 2);
+    await new Promise((r) => setTimeout(r, 300));
+    const victim = [...c.workers][0];
+    process.kill(-victim.p.pid, 'SIGKILL');
+    const t0 = Date.now();
+    while (Date.now() - t0 < 4000 && !(c.status().deaths === 1 && c.status().live === 2)) await new Promise((r) => setTimeout(r, 50));
+    assert.equal(c.status().deaths, 1);
+    assert.equal(c.status().live, 2, 'the pool is back at its warm size');
+    assert.equal(c.status().calls, 0, 'without any call triggering the respawn');
+    assert.equal(c.status().spawns, 3);
+  } finally { c.close(); }
+});
+
+test('a closed client does not refill', async () => {
+  const c = new ChannelClient('t', { size: 1, command: fake(), timeoutMs: 2000 });
+  c.warm();
+  c.close();
+  await new Promise((r) => setTimeout(r, 700));
+  assert.equal(c.status().live, 0);
+  assert.equal(c.status().spawns, 1);
+});
+
 test('silentWav builds a valid 16-bit mono PCM WAV of the requested length', async () => {
   const { silentWav } = await import('../../gui/lib/stt.mjs');
   const b = silentWav(16000, 0.5);
