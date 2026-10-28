@@ -159,11 +159,26 @@ export class ChannelClient {
     this.nextSpawnAt = now + RESPAWN_BACKOFF_MS[Math.min(this.deaths, RESPAWN_BACKOFF_MS.length - 1)];
     this.lastError = why;
     this._pump();
+    this._refillLater();
+  }
+  /** A warmed pool stays warm: a dead worker is replaced once the backoff allows, not on the next
+   *  burst (where the replacement would pay the 6-9 s join+pair measured live inside the caller's budget). */
+  _refillLater() {
+    if (!this.warmTarget || this.closed || this._refill) return;
+    this._refill = setTimeout(() => {
+      this._refill = null;
+      if (this.closed) return;
+      this.warm(this.warmTarget);
+      if (this.workers.size < this.warmTarget) this._refillLater();
+    }, Math.max(0, this.nextSpawnAt - Date.now()));
+    if (this._refill.unref) this._refill.unref();
   }
   /** Spawn up to `n` idle processes now, so the first real call does not pay the join+pair
    *  (~5-8 s measured live for the first dictation after a restart). No-op for workers already up. */
   warm(n = this.size) {
     const want = Math.min(this.size, n);
+    this.closed = false;
+    this.warmTarget = Math.max(this.warmTarget || 0, want);
     while (this.workers.size < want && Date.now() >= this.nextSpawnAt) {
       const w = new Worker(this, ++this.seq); this.workers.add(w); this.stats.spawns++;
     }
@@ -171,6 +186,8 @@ export class ChannelClient {
   }
   /** Close every held process (stdin EOF = clean teardown, then SIGKILL as a backstop). */
   close() {
+    this.closed = true; this.warmTarget = 0;
+    if (this._refill) { clearTimeout(this._refill); this._refill = null; }
     for (const w of this.workers) w.kill();
     this.workers.clear();
     for (const c of this.queue.splice(0)) c.resolve(null);
