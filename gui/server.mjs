@@ -39,6 +39,7 @@ import { placeFromQuery, swapCityFollowups, splitSentences, speechChunks, ttsSaf
 import { ttsSpeak, proxied, TTS_DIR, streamClips, limiterStats, protectClip, unprotectClip, ttsHealth, startChannelKeepalive } from './lib/tts.mjs';
 import { transcribe, sttBlobPath, silentWav } from './lib/stt.mjs';
 import { channelStats, closeChannels, warmChannels } from './lib/channel.mjs';
+import { socialReply, worthAnswering, answerableGuess, OUT_OF_SCOPE } from './lib/answer-first.mjs';
 import { catalogSummary, understand, followupSuggestions, STUB } from './lib/llm.mjs';
 import { configurePipeline, answerFor, hasRealData, validateSuggestions, poolSuggestions, trace, traceLines, pipelineStats } from './lib/pipeline.mjs';
 import * as bridging from './lib/bridging.mjs';
@@ -49,6 +50,7 @@ const __dir = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dir, '..');
 const PORT = parseInt(process.env.PORT || '8791', 10);
 configurePipeline({ runtime: join(REPO_ROOT, 'scripts', 'n8n_workflow_runtime.mjs'), repoRoot: REPO_ROOT });
+const CC_ANSWER_FIRST_MS = Number(process.env.CC_ANSWER_FIRST_MS) || 9000;
 const CATALOG_SUMMARY = catalogSummary(join(REPO_ROOT, 'catalog.json'));
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -148,8 +150,23 @@ async function handle(req, res) {
     const b = await readBody(req);
     const query = str(b.query);
     if (!query.trim()) return jsonRes(res, 400, { error: 'empty query' });
+    const social = socialReply(query);
+    if (social) {
+      let clarifyAudioUrl = null;
+      try { clarifyAudioUrl = proxied(await ttsSpeak(social, { priority: true, userKey })); } catch {}
+      trace('understand', { query, kind: 'smalltalk' });
+      return jsonRes(res, 200, { kind: 'smalltalk', precise: false, clarify: social, best_guess: '', options: [], slots: { ort: null, indikator: null }, clarifyAudioUrl });
+    }
     answerFor(query, false, userKey);                       // t=0 speculation: the Atlas query starts before we even understood it
     const u = await understand(query, b.context, CATALOG_SUMMARY);
+    if (worthAnswering(u, query)) {
+      // Answer first: the question is only kept when the best guess has no real data. The wait is
+      // covered by the bridging loop, and /answer finds this result ready.
+      const guess = answerableGuess(u, query);
+      const r = await Promise.race([answerFor(guess, false, userKey), new Promise((ok) => setTimeout(ok, CC_ANSWER_FIRST_MS, null))]);
+      if (hasRealData(r)) { u.precise = true; u.clarify = ''; u.best_guess = guess; }
+    }
+    if (!u.precise && !u.clarify) u.clarify = OUT_OF_SCOPE;
     trace('understand', { query, precise: u.precise, kind: u.kind, clarify: u.clarify.slice(0, 70), best_guess: u.best_guess, slots: u.slots });
     answerFor(u.best_guess, false, userKey);                // also warm the resolved query (cache hit when unchanged)
     if (u.precise) {
