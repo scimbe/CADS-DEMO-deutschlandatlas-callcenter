@@ -23,3 +23,8 @@ test('the best guess always names the place', () => {
   assert.equal(answerableGuess(u({ best_guess: 'Wie hoch ist die Miete in Kiel?', slots: { ort: 'Kiel' } }), 'x'), 'Wie hoch ist die Miete in Kiel?');
   assert.equal(turnPlace(u({ best_guess: 'Wie hoch ist die Miete in Kiel?' }), 'x'), 'Kiel');
 });
+test('official city-state names are not read out', async () => {
+  const { cleanSpoken } = await import('../../gui/lib/text.mjs');
+  assert.equal(cleanSpoken('In Hamburg, der Freie und Hansestadt, liegen die Mieten bei 11 Euro.'), 'In Hamburg liegen die Mieten bei 11 Euro.');
+  assert.equal(cleanSpoken('Die Quote in Bremen, Freie Hansestadt, liegt bei 9 Prozent.'), 'Die Quote in Bremen liegt bei 9 Prozent.');
+});

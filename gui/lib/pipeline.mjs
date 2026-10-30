@@ -103,7 +103,7 @@ export function answerFor(query, priority = false, userKey = 'anon') {
     let answer, meta, ok, err = null, reused = false;
     const cached = diskGet(key);
     if (cached && cached.answer && cached.meta) {
-      answer = cached.answer; meta = cached.meta; ok = true; reused = true;
+      answer = cleanSpoken(cached.answer); meta = cached.meta; ok = true; reused = true;
       rememberVerified(key);
     } else {
       let r;
