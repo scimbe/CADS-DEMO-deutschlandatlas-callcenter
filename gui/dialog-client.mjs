@@ -170,7 +170,7 @@ export class Dialog {
     if (u.precise) { this.pending = null; turn.kind = u.kind; return this._deliver(turn, u.best_guess); }
     // CLARIFY: the question replaces the answer this turn (hard part → pending soft parts are dropped)
     turn.waiting = false; this.player.dropPendingSoft();
-    this.pending = { clarify: u.clarify || '', best_guess: u.best_guess || '', options: u.options || [], original: query };
+    this.pending = u.kind === 'smalltalk' ? null : { clarify: u.clarify || '', best_guess: u.best_guess || '', options: u.options || [], original: query };
     const c = this.player.enqueue(PART.CLARIFY, { fallbackText: u.clarify || null }); this.player.fill(c, u.clarifyAudioUrl || null);
     this.ui.setState('idle'); this.ui.clarify(u.clarify);
     const items = [];

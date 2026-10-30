@@ -99,7 +99,9 @@ const UNDERSTAND_SYS = [
   ' "best_guess": string, // die vollständige, AUFGELÖSTE konkrete Frage als deutscher Fragesatz (Indikator + Ort); IMMER gesetzt',
   ' "options": [string],  // 2-3 konkrete alternative Fragesätze zur Auswahl (je Indikator + Ort)',
   ' "slots": {"ort": string|null, "indikator": string|null}}  // die für best_guess erkannten Slots',
+  'Stelle nur eine Rückfrage, wenn der Ort oder das Thema fehlt. Passen mehrere Indikatoren zum Thema, wähle den naheliegendsten und setze precise=true.',
   'Fehlt der Ort auch nach Auflösung, frage gezielt nach dem Ort. Ist das Thema unklar, biete die naheliegendsten Indikatoren an.',
+  'Die Rückfrage ist ein einziger kurzer Satz. Ranglisten über mehrere Orte kannst du nicht liefern, biete sie nicht an.',
 ].join('\n');
 // If we just asked a clarifying question, the next utterance is resolved AGAINST it first.
 const CLARIFY_SYS = [
